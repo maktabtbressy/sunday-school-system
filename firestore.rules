@@ -3,16 +3,17 @@ service cloud.firestore {
   match /databases/{database}/documents {
 
     function isSignedIn() { return request.auth != null; }
+    function userDocExists() { return isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)); }
     function myDoc() { return get(/databases/$(database)/documents/users/$(request.auth.uid)); }
-    function myRole() { return myDoc().data.role; }
-    function myChurch() { return myDoc().data.churchId; }
+    function myRole() { return userDocExists() ? myDoc().data.role : null; }
+    function myChurch() { return userDocExists() ? myDoc().data.churchId : null; }
     function isSuperAdmin() { return isSignedIn() && myRole() == 'superadmin'; }
     function isChurchAdmin() { return isSignedIn() && myRole() == 'admin'; }
     function belongsToChurch(chId) { return isSignedIn() && myChurch() == chId; }
 
-    // ===== الكنايس (المستأجرين) =====
+    // ===== الكنايس (المستأجرين): قراءة عامة لأي مستخدم مسجّل (بيانات غير حساسة) =====
     match /churches/{chId} {
-      allow read: if isSuperAdmin() || belongsToChurch(chId);
+      allow read: if isSignedIn();
       // إنشاء كنيسة جديدة بيحصل وقت التسجيل الذاتي لمسؤول كنيسة جديدة
       allow create: if isSignedIn();
       // تعديل حالة الاشتراك/التفعيل مسموح للمالك بس (حماية من إن حد يفعّل نفسه بنفسه)
