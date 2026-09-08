@@ -286,25 +286,33 @@ App.logout = async function(){
 const ROLE_LABELS = {admin:'مدير النظام', servant:'خادم', staff:'مستخدم إداري', superadmin:'مالك النظام'};
 
 onAuthStateChanged(auth, async (fbUser) => {
-  if(REGISTERING) return; // تجاهل التغيّر المؤقت أثناء إنشاء حساب كنيسة جديدة؛ App.submitRegister بيتولى تسجيل الخروج بنفسه
+  console.log('[AUTH] onAuthStateChanged fired. fbUser =', fbUser ? fbUser.email : null, 'REGISTERING =', REGISTERING);
+  if(REGISTERING) { console.log('[AUTH] skipped: REGISTERING flag is true'); return; }
   detachListeners();
   if(!fbUser){
+    console.log('[AUTH] no fbUser -> showing login screen');
     CURRENT_USER = null; CURRENT_CHURCH_ID = null; CURRENT_CHURCH = null;
     hideAllAuthScreens();
     document.getElementById('login-screen').style.display='flex';
     return;
   }
   try{
+    console.log('[AUTH] step 1: fetching users/'+fbUser.uid);
     let roleDoc = await getDoc(doc(dbFire,'users', fbUser.uid));
+    console.log('[AUTH] step 1 done. roleDoc.exists =', roleDoc.exists());
 
     if(!roleDoc.exists()){
-      // حساب مسجّل دخول بس لسه معندوش دور: لو النظام كله فاضي (أول تشغيل)، يبقى مالك النظام تلقائيًا
+      console.log('[AUTH] step 2: no role doc yet, checking if system is empty (bootstrap check)');
       const churchesSnap = await getDocs(collection(dbFire,'churches'));
       const usersSnap = await getDocs(collection(dbFire,'users'));
+      console.log('[AUTH] step 2 done. churchesEmpty =', churchesSnap.empty, 'usersEmpty =', usersSnap.empty);
       if(churchesSnap.empty && usersSnap.empty){
+        console.log('[AUTH] step 2b: system empty -> promoting this account to superadmin');
         await setDoc(doc(dbFire,'users', fbUser.uid), {name: fbUser.email.split('@')[0], email: fbUser.email, role: 'superadmin'});
         roleDoc = await getDoc(doc(dbFire,'users', fbUser.uid));
+        console.log('[AUTH] step 2b done. roleDoc.exists =', roleDoc.exists());
       } else {
+        console.log('[AUTH] step 2c: system not empty, no role for this account -> pending screen');
         showPendingScreen('تم تسجيل دخولك، لكن لا يوجد لك دور مُفعّل في النظام. تواصل مع الإدارة.');
         await signOut(auth);
         return;
@@ -312,11 +320,14 @@ onAuthStateChanged(auth, async (fbUser) => {
     }
 
     let userData = roleDoc.data();
+    console.log('[AUTH] step 3: userData =', JSON.stringify(userData));
 
     // ترقية تلقائية لمرة واحدة: حساب "مدير" قديم من قبل تفعيل تعدد الكنايس ومعندوش كنيسة مرتبطة
     if(userData.role === 'admin' && !userData.churchId){
+      console.log('[AUTH] step 4: legacy admin without churchId -> checking migration');
       const churchesSnap = await getDocs(collection(dbFire,'churches'));
       if(churchesSnap.empty){
+        console.log('[AUTH] step 4b: migrating legacy admin to superadmin + demo church');
         const demoChurchId = await fsAddRaw('churches', {
           name: (userData.name||'بيانات')+' - كنيسة تجريبية', contactPhone:'', contactEmail:userData.email,
           status:'active', activeUntil: '2099-12-31', createdAt: Date.now(),
@@ -325,22 +336,31 @@ onAuthStateChanged(auth, async (fbUser) => {
         await setDoc(doc(dbFire,'users', fbUser.uid), {name:userData.name, email:userData.email, role:'superadmin'});
         roleDoc = await getDoc(doc(dbFire,'users', fbUser.uid));
         userData = roleDoc.data();
+        console.log('[AUTH] step 4b done. new userData =', JSON.stringify(userData));
       }
     }
 
     CURRENT_USER = {uid: fbUser.uid, email: fbUser.email, ...userData};
+    console.log('[AUTH] step 5: CURRENT_USER set. role =', CURRENT_USER.role);
 
     /* ----- مالك النظام: لوحة منفصلة تمامًا ----- */
     if(CURRENT_USER.role === 'superadmin'){
+      console.log('[AUTH] step 6: role is superadmin -> showing superadmin-app');
       hideAllAuthScreens();
-      document.getElementById('superadmin-app').style.display='flex';
+      const saApp = document.getElementById('superadmin-app');
+      console.log('[AUTH] superadmin-app element found?', !!saApp);
+      saApp.style.display='flex';
       document.getElementById('sa-user-name').textContent = CURRENT_USER.name;
+      console.log('[AUTH] step 7: calling SuperAdmin.boot()');
       SuperAdmin.boot();
+      console.log('[AUTH] step 8: SuperAdmin.boot() called, logging audit entry');
       await log('تسجيل دخول (مالك النظام)', CURRENT_USER.name);
+      console.log('[AUTH] DONE - superadmin flow complete');
       return;
     }
 
     /* ----- باقي الأدوار: لازم تكون مرتبطة بكنيسة نشطة ----- */
+    console.log('[AUTH] step 6b: not superadmin, churchId =', CURRENT_USER.churchId);
     if(!CURRENT_USER.churchId){
       showPendingScreen('لا يوجد لك كنيسة مرتبطة بعد. تواصل مع الإدارة.');
       await signOut(auth); return;
@@ -374,6 +394,7 @@ onAuthStateChanged(auth, async (fbUser) => {
     }
 
     /* ----- تمام: دخول عادي للنظام ----- */
+    console.log('[AUTH] step 9: normal church login, showing app');
     hideAllAuthScreens();
     document.getElementById('app').style.display='flex';
     document.getElementById('current-user-name').textContent = CURRENT_USER.name;
@@ -382,8 +403,9 @@ onAuthStateChanged(auth, async (fbUser) => {
     DB.users = [CURRENT_USER];
     attachListeners(()=>{ App.navigate('dashboard'); });
     await log('تسجيل دخول', CURRENT_USER.name);
+    console.log('[AUTH] DONE - church login flow complete');
   }catch(e){
-    console.error(e);
+    console.error('[AUTH] CAUGHT ERROR:', e);
     hideAllAuthScreens();
     document.getElementById('login-error').textContent = mapAuthError(e);
     document.getElementById('login-error').style.display='block';
