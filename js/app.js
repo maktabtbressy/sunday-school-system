@@ -727,6 +727,7 @@ SuperAdmin.renderMethods = function(el){
         ${m.instructions?`<p class="muted" style="margin-top:6px;">${esc(m.instructions)}</p>`:''}
         <div class="row-actions" style="margin-top:12px;">
           <button class="btn btn-ghost btn-sm" onclick="SuperAdmin.openMethodForm('${m.id}')">تعديل</button>
+          <button class="btn btn-ghost btn-sm" onclick="SuperAdmin.openAttachmentsModal('${m.id}')">🖼️ المرفقات</button>
           <button class="btn btn-danger btn-sm" onclick="SuperAdmin.removeMethod('${m.id}')">حذف</button>
         </div>
       </div>`).join('') : `<p class="muted">لا توجد طرق دفع مضافة بعد.</p>`}
@@ -762,6 +763,66 @@ SuperAdmin.removeMethod = async function(id){
   if(!confirm('حذف طريقة الدفع دي؟')) return;
   try{ await deleteDoc(doc(dbFire,'paymentMethods',id)); toast('تم الحذف'); }
   catch(e){ console.error(e); toast('تعذر الحذف: '+e.message); }
+};
+
+/* ---- مرفقات طريقة الدفع (صور QR/محافظ متعددة، مخزّنة في subcollection خاص بكل طريقة) ---- */
+SuperAdmin.openAttachmentsModal = async function(methodId){
+  const m = SA_METHODS.find(x=>x.id===methodId) || {};
+  UI.openModal(`مرفقات: ${esc(m.name||'')}`, `
+    <div id="pm-attachments-box"><p class="muted">جاري تحميل المرفقات...</p></div>
+    <div class="field" style="margin-top:16px; border-top:1px solid var(--line); padding-top:16px;">
+      <label>توضيح المرفق (مثال: رقم المحفظة أو اسم الفرع)</label>
+      <input id="pm-att-label" placeholder="مثال: محفظة فودافون كاش - الفرع الرئيسي">
+    </div>
+    <div class="field"><label>الصورة</label><input type="file" id="pm-att-file" accept="image/*"></div>
+    <p class="login-error" id="pm-att-error" style="display:block;"></p>
+  `, `
+    <button class="btn btn-primary" onclick="SuperAdmin.addAttachment('${methodId}')">+ إضافة المرفق</button>
+    <button class="btn btn-ghost" onclick="UI.closeModal()">إغلاق</button>
+  `);
+  await SuperAdmin.renderAttachmentsList(methodId);
+};
+SuperAdmin.renderAttachmentsList = async function(methodId){
+  const box = document.getElementById('pm-attachments-box');
+  if(!box) return; // المودال اتقفل قبل ما التحميل يخلص
+  try{
+    const snap = await getDocs(collection(dbFire,'paymentMethods',methodId,'attachments'));
+    const atts = snap.docs.map(d=>({id:d.id, ...d.data()})).sort((a,b)=>(a.createdAt||0)-(b.createdAt||0));
+    box.innerHTML = atts.length ? `<div class="attachment-grid">
+      ${atts.map(a=>`
+        <div class="attachment-thumb">
+          <img src="${a.img}" onclick="UI.previewImage('${(a.img||'').replace(/'/g,"\\'")}')">
+          <small>${esc(a.label||'')}</small>
+          <a class="att-remove" onclick="SuperAdmin.removeAttachment('${methodId}','${a.id}')">✖ حذف</a>
+        </div>
+      `).join('')}
+    </div>` : `<p class="muted">لا توجد مرفقات مضافة لطريقة الدفع دي بعد.</p>`;
+  }catch(e){ console.error(e); box.innerHTML = `<p class="muted">تعذر تحميل المرفقات.</p>`; }
+};
+SuperAdmin.addAttachment = async function(methodId){
+  const labelInput = document.getElementById('pm-att-label');
+  const fileInput = document.getElementById('pm-att-file');
+  const errEl = document.getElementById('pm-att-error');
+  const label = labelInput.value.trim();
+  const file = fileInput.files[0];
+  errEl.textContent = '';
+  if(!file){ errEl.textContent = 'اختر صورة المرفق أولًا'; return; }
+  if(!label){ errEl.textContent = 'اكتب توضيح للمرفق (زي رقم المحفظة) عشان الكنايس متتلخبطش'; return; }
+  try{
+    const img = await compressImage(file, 700, 0.7);
+    await addDoc(collection(dbFire,'paymentMethods',methodId,'attachments'), { label, img, createdAt: Date.now() });
+    labelInput.value = ''; fileInput.value = '';
+    await SuperAdmin.renderAttachmentsList(methodId);
+    toast('تمت إضافة المرفق');
+  }catch(e){ console.error(e); errEl.textContent = 'تعذر رفع المرفق: '+e.message; }
+};
+SuperAdmin.removeAttachment = async function(methodId, attId){
+  if(!confirm('حذف هذا المرفق؟')) return;
+  try{
+    await deleteDoc(doc(dbFire,'paymentMethods',methodId,'attachments',attId));
+    await SuperAdmin.renderAttachmentsList(methodId);
+    toast('تم الحذف');
+  }catch(e){ console.error(e); toast('تعذر الحذف: '+e.message); }
 };
 
 /* ---- مراجعة إثباتات الدفع ---- */
@@ -952,6 +1013,10 @@ UI.openModal = function(title, bodyHtml, footHtml){
   document.getElementById('modal-backdrop').classList.add('open');
 };
 UI.closeModal = function(){ document.getElementById('modal-backdrop').classList.remove('open'); };
+/* معاينة صورة مكبّرة داخل مودال (تُستخدم لمرفقات طرق الدفع وإثباتات الدفع) */
+UI.previewImage = function(src){
+  UI.openModal('معاينة الصورة', `<div style="text-align:center;"><img src="${src}" style="max-width:100%; border-radius:10px; border:1px solid var(--line);"></div>`, `<button class="btn btn-ghost btn-block" onclick="UI.closeModal()">إغلاق</button>`);
+};
 
 /* قائمة جانبية للموبايل (سحب/إخفاء) */
 UI.openSidebar = function(){ document.getElementById('sidebar').classList.add('open'); document.getElementById('sidebar-backdrop').classList.add('open'); };
@@ -2041,6 +2106,8 @@ Views.billing = function(){
           <h3 style="font-size:14.5px; margin:0 0 6px;">${esc(m.name)}</h3>
           <div style="font-size:17px; font-weight:800; color:var(--navy); font-family:'Markazi Text',serif;">${esc(m.details)}</div>
           ${m.instructions? `<p class="muted" style="margin-top:8px;">${esc(m.instructions)}</p>`:''}
+          ${m.qrImage? `<img src="${m.qrImage}" style="max-width:140px; max-height:140px; border-radius:8px; border:1px solid var(--line); margin-top:10px; cursor:pointer;" onclick="UI.previewImage('${m.qrImage.replace(/'/g,"\\'")}')">` : ''}
+          <div class="attachment-grid" id="billing-att-${m.id}" style="margin-top:10px;"></div>
         </div>`).join('')}
       </div>
     ` : `<p class="muted" style="margin-bottom:20px;">لا توجد طرق دفع مُعلنة من الإدارة حاليًا.</p>`}
@@ -2062,6 +2129,22 @@ Views.billing = function(){
         <td>${p.status==='approved'?'<span class="pill pill-active">تم القبول</span>':p.status==='rejected'?'<span class="pill pill-inactive">مرفوض</span>':'<span class="church-status status-pending">قيد المراجعة</span>'}</td>
       </tr>`).join('')}</tbody></table>` : `<div class="empty-state">لا توجد طلبات دفع سابقة</div>`}</div>
   `;
+  methods.forEach(m => Billing.loadMethodAttachments(m.id));
+};
+/* تحميل مرفقات طريقة دفع معينة (بعد رسم الشاشة) وعرضها في الصندوق الخاص بها */
+Billing.loadMethodAttachments = async function(methodId){
+  try{
+    const snap = await getDocs(collection(dbFire,'paymentMethods',methodId,'attachments'));
+    const box = document.getElementById('billing-att-'+methodId);
+    if(!box) return; // المستخدم غيّر الصفحة قبل ما التحميل يخلص
+    const atts = snap.docs.map(d=>({id:d.id, ...d.data()})).sort((a,b)=>(a.createdAt||0)-(b.createdAt||0));
+    box.innerHTML = atts.map(a=>`
+      <div class="attachment-thumb">
+        <img src="${a.img}" onclick="UI.previewImage('${(a.img||'').replace(/'/g,"\\'")}')">
+        <small>${esc(a.label||'')}</small>
+      </div>
+    `).join('');
+  }catch(e){ /* عرض المرفقات مش حرج، لو فشل بنتجاهله بصمت */ }
 };
 Billing.submitProof = async function(){
   const fileInput = document.getElementById('proof-file');

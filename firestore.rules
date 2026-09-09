@@ -95,6 +95,13 @@ service cloud.firestore {
     match /paymentMethods/{docId} {
       allow read: if isSignedIn();
       allow write: if isSuperAdmin();
+
+      // مرفقات طريقة الدفع (زي صور QR متعددة)، مخزّنة في مجموعة فرعية
+      // منفصلة عشان الصور الكبيرة ماتتكدسش في مستند واحد وتتخطى حد حجم المستند.
+      match /attachments/{attId} {
+        allow read: if isSignedIn();
+        allow write: if isSuperAdmin();
+      }
     }
 
     // ===== إثباتات الدفع المرسلة من كل كنيسة =====
