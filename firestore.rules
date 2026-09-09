@@ -84,6 +84,14 @@ service cloud.firestore {
     }
 
     // ===== طرق الدفع (عامة للإدارة، تُعرض على كل الكنايس) =====
+    // ===== دعوات المستخدمين (مدير الكنيسة يدعو خدام/مستخدمين جدد بالبريد) =====
+    match /invites/{emailId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && (isSuperAdmin() || (isChurchAdmin() && request.resource.data.churchId == myChurch()));
+      allow update: if isSignedIn();
+      allow delete: if isSignedIn() && (isSuperAdmin() || isChurchAdmin());
+    }
+
     match /paymentMethods/{docId} {
       allow read: if isSignedIn();
       allow write: if isSuperAdmin();

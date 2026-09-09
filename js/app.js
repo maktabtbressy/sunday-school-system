@@ -37,7 +37,7 @@ function nameOf(arr, id, field='name'){ const o = byId(arr,id); return o ? o[fie
 import { firebaseConfig } from './firebase-config.js';
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.13.1/firebase-app.js';
 import {
-  getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut,
+  getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, sendPasswordResetEmail, deleteUser,
 } from 'https://www.gstatic.com/firebasejs/10.13.1/firebase-auth.js';
 import {
   getFirestore, collection, doc, addDoc, setDoc, updateDoc, deleteDoc,
@@ -64,7 +64,7 @@ let unsubscribers = [];
 function detachListeners(){ unsubscribers.forEach(u=>u()); unsubscribers = []; }
 
 function attachListeners(onReady){
-  const isAdmin = CURRENT_USER && CURRENT_USER.role==='admin';
+  const isAdmin = CURRENT_USER && (CURRENT_USER.role==='admin' || IMPERSONATING);
   let pending = LIVE_COLLECTIONS.length + 2 + (isAdmin?1:0); // + settings + auditLog + (users لو مدير كنيسة)
   const tick = () => { pending--; if(pending<=0 && onReady) { onReady(); onReady=null; } renderCurrent(); };
 
@@ -189,7 +189,7 @@ async function tagLegacyDataWithChurch(churchId){
 
 /* ---------------- شاشات المصادقة ---------------- */
 function hideAllAuthScreens(){
-  ['login-screen','register-screen','pending-screen','locked-screen'].forEach(id=>{
+  ['login-screen','register-screen','pending-screen','locked-screen','forgot-screen','join-screen'].forEach(id=>{
     document.getElementById(id).style.display='none';
   });
   document.getElementById('app').style.display='none';
@@ -211,6 +211,8 @@ function mapAuthError(e){
   if(code==='auth/invalid-email') return 'صيغة البريد الإلكتروني غير صحيحة';
   if(code==='auth/weak-password') return 'كلمة المرور ضعيفة، استخدم 6 أحرف على الأقل';
   if(code==='auth/wrong-password' || code==='auth/invalid-credential') return 'البريد الإلكتروني أو كلمة المرور غير صحيحة';
+  if(code==='auth/user-not-found') return 'لا يوجد حساب مسجّل بهذا البريد الإلكتروني';
+  if(code==='auth/too-many-requests') return 'محاولات كثيرة متتالية، حاول تاني بعد شوية';
   return 'حدث خطأ: ' + (e && e.message ? e.message : '');
 }
 
@@ -220,9 +222,80 @@ App.showRegister = function(){
   document.getElementById('login-screen').style.display='none';
   document.getElementById('register-screen').style.display='flex';
 };
+App.showJoin = function(){
+  document.getElementById('login-screen').style.display='none';
+  document.getElementById('join-screen').style.display='flex';
+};
+App.submitJoin = async function(){
+  const email = document.getElementById('join-email').value.trim().toLowerCase();
+  const pass = document.getElementById('join-pass').value;
+  const err = document.getElementById('join-error');
+  const btn = document.getElementById('join-btn');
+  err.style.display='none'; err.style.color='';
+  if(!email || !pass){ err.textContent='أدخل البريد الإلكتروني وكلمة المرور'; err.style.display='block'; return; }
+  if(pass.length < 6){ err.textContent='كلمة المرور 6 أحرف على الأقل'; err.style.display='block'; return; }
+  btn.disabled = true; btn.textContent='جاري التفعيل...';
+  REGISTERING = true;
+  let cred = null;
+  try{
+    cred = await createUserWithEmailAndPassword(auth, email, pass);
+    const inviteSnap = await getDoc(doc(dbFire,'invites', email));
+    if(!inviteSnap.exists() || inviteSnap.data().used){
+      await deleteUser(cred.user);
+      err.textContent = 'مفيش دعوة صالحة على البريد ده. تأكد من البريد أو اطلب من مسؤول كنيستك يبعتلك دعوة جديدة.';
+      err.style.display='block';
+      return;
+    }
+    const inv = inviteSnap.data();
+    await setDoc(doc(dbFire,'users', cred.user.uid), {
+      name: inv.name || email.split('@')[0], email, role: inv.role, churchId: inv.churchId,
+    });
+    await updateDoc(doc(dbFire,'invites', email), {used:true});
+    await signOut(auth);
+    document.getElementById('join-screen').style.display='none';
+    document.getElementById('pending-message').textContent = 'تم تفعيل حسابك بنجاح! سجّل الدخول دلوقتي بنفس البريد وكلمة المرور اللي اخترتها.';
+    document.getElementById('pending-screen').style.display='flex';
+  }catch(e){
+    if(cred){ try{ await deleteUser(cred.user); }catch(_){} }
+    err.textContent = mapAuthError(e);
+    err.style.display='block';
+  }finally{
+    btn.disabled = false; btn.textContent='تفعيل حسابي';
+    REGISTERING = false;
+  }
+};
+
+
 App.showLogin = function(){
   document.getElementById('register-screen').style.display='none';
+  document.getElementById('forgot-screen').style.display='none';
+  document.getElementById('join-screen').style.display='none';
+  document.getElementById('pending-screen').style.display='none';
   document.getElementById('login-screen').style.display='flex';
+};
+App.showForgot = function(){
+  document.getElementById('login-screen').style.display='none';
+  document.getElementById('forgot-screen').style.display='flex';
+};
+App.submitForgot = async function(){
+  const email = document.getElementById('forgot-email').value.trim();
+  const err = document.getElementById('forgot-error');
+  const btn = document.getElementById('forgot-btn');
+  err.style.display='none';
+  if(!email){ err.textContent='أدخل بريدك الإلكتروني'; err.style.display='block'; return; }
+  btn.disabled = true; btn.textContent='جاري الإرسال...';
+  try{
+    await sendPasswordResetEmail(auth, email);
+    err.style.color = 'var(--present)';
+    err.textContent = 'تم إرسال رابط إعادة تعيين كلمة المرور إلى بريدك، افتحه واتبع التعليمات.';
+    err.style.display='block';
+  }catch(e){
+    err.style.color = '';
+    err.textContent = mapAuthError(e);
+    err.style.display='block';
+  }finally{
+    btn.disabled = false; btn.textContent='إرسال رابط الاستعادة';
+  }
 };
 
 App.login = async function(){
@@ -455,6 +528,7 @@ SuperAdmin.boot = function(){
 const SA_PAGE_TITLES = {churches:'الكنايس', requests:'طلبات جديدة', methods:'طرق الدفع', payments:'مراجعة المدفوعات', chats:'الدردشات'};
 SuperAdmin.navigate = function(page){
   SA_PAGE = page;
+  UI.closeSaSidebar();
   document.querySelectorAll('#sa-nav a').forEach(a=>a.classList.toggle('active', a.dataset.page===page));
   document.getElementById('sa-page-title').textContent = SA_PAGE_TITLES[page] || page;
   SuperAdmin.render();
@@ -524,6 +598,9 @@ SuperAdmin.openChurch = async function(id){
         <button class="btn btn-danger" style="flex:1;" onclick="SuperAdmin.reject('${c.id}')">رفض الطلب</button>
       </div>
     ` : `
+      <div style="display:flex; gap:10px; margin-bottom:14px;">
+        <button class="btn btn-primary btn-block" onclick="SuperAdmin.enterChurch('${c.id}')">🔑 ادخل كلوحة هذه الكنيسة</button>
+      </div>
       <div class="form-grid" style="margin-bottom:10px;">
         <div class="field"><label>تفعيل / تمديد الاشتراك (بالأيام)</label><input type="number" id="sa-extend-days" value="30" min="1"></div>
       </div>
@@ -535,6 +612,7 @@ SuperAdmin.openChurch = async function(id){
     `}
     <h3 style="font-size:14px;">مستخدمو الكنيسة</h3>
     <div id="sa-church-users">${usersHtml}</div>
+    ${!isPending ? `<button class="btn btn-danger btn-block" style="margin-top:18px;" onclick="SuperAdmin.deleteChurch('${c.id}','${esc(c.name).replace(/'/g,"\\'")}')">🗑 حذف الكنيسة نهائيًا (كل بياناتها)</button>` : ''}
   `, `<button class="btn btn-ghost" onclick="UI.closeModal()">إغلاق</button>`);
 
   try{
@@ -585,6 +663,53 @@ SuperAdmin.unexempt = async function(id){
     UI.closeModal(); toast('تم إلغاء الإعفاء — الكنيسة محتاجة تفعيل اشتراك دلوقتي');
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
 };
+SuperAdmin.deleteChurch = async function(id, name){
+  const typed = prompt('حذف الكنيسة "'+name+'" وكل بياناتها (مخدومين، خدام، حضور، مستخدمين... كل حاجة) نهائيًا ومفيش رجوع.\n\nاكتب اسم الكنيسة بالظبط للتأكيد:');
+  if(typed !== name){ if(typed!==null) toast('الاسم مش مطابق، اتلغت العملية'); return; }
+  try{
+    toast('جاري حذف بيانات الكنيسة...');
+    const tenantCols = ['members','servants','stages','grades','classes','attendance','evaluations','followups','activities','auditLog','paymentProofs','chatMessages'];
+    for(const col of tenantCols){
+      await fsDeleteWhere(col, 'churchId', id);
+    }
+    const usersSnap = await getDocs(query(collection(dbFire,'users'), where('churchId','==', id)));
+    await Promise.all(usersSnap.docs.map(d=>deleteDoc(d.ref)));
+    await deleteDoc(doc(dbFire,'settings', id));
+    await deleteDoc(doc(dbFire,'churches', id));
+    UI.closeModal();
+    toast('تم حذف الكنيسة وكل بياناتها نهائيًا');
+  }catch(e){ console.error(e); toast('تعذر الحذف بالكامل: '+e.message); }
+};
+
+/* ---- دخول المالك مؤقتًا للوحة كنيسة معينة (للدعم الفني أو الاستخدام المباشر) ---- */
+SuperAdmin.enterChurch = function(id){
+  const c = byId(SA_CHURCHES, id);
+  if(!c) return;
+  UI.closeModal();
+  detachListeners();
+  IMPERSONATING = true;
+  CURRENT_CHURCH_ID = id;
+  CURRENT_CHURCH = c;
+  document.getElementById('superadmin-app').style.display='none';
+  document.getElementById('app').style.display='flex';
+  document.getElementById('current-user-name').textContent = CURRENT_USER.name + ' (دعم فني)';
+  document.getElementById('current-user-role').textContent = 'داخل لوحة: ' + c.name;
+  document.getElementById('exit-impersonation-link').style.display='inline-block';
+  buildNav();
+  attachListeners(()=>{ App.navigate('dashboard'); });
+  toast('دخلت لوحة كنيسة: ' + c.name);
+};
+App.exitImpersonation = function(){
+  detachListeners();
+  IMPERSONATING = false;
+  CURRENT_CHURCH_ID = null;
+  CURRENT_CHURCH = null;
+  document.getElementById('app').style.display='none';
+  document.getElementById('exit-impersonation-link').style.display='none';
+  document.getElementById('superadmin-app').style.display='flex';
+  document.getElementById('sa-user-name').textContent = CURRENT_USER.name;
+  SuperAdmin.boot();
+};
 
 /* ---- طرق الدفع (تُدار من المالك، وتظهر لكل الكنايس) ---- */
 SuperAdmin.renderMethods = function(el){
@@ -597,7 +722,8 @@ SuperAdmin.renderMethods = function(el){
         <div class="section-head" style="margin-bottom:6px;"><h2 style="font-size:14.5px;">${esc(m.name)}</h2>
           <span class="pill ${m.active!==false?'pill-active':'pill-inactive'}">${m.active!==false?'مفعّلة':'متوقفة'}</span>
         </div>
-        <div style="font-weight:800; color:var(--navy); font-family:'Cairo',sans-serif;">${esc(m.details)}</div>
+        <div style="font-weight:800; color:var(--navy); font-family:'Markazi Text',serif;">${esc(m.details)}</div>
+        ${m.qrImage? `<img src="${m.qrImage}" style="max-width:100%; max-height:140px; border-radius:8px; border:1px solid var(--line); margin-top:8px;">` : ''}
         ${m.instructions?`<p class="muted" style="margin-top:6px;">${esc(m.instructions)}</p>`:''}
         <div class="row-actions" style="margin-top:12px;">
           <button class="btn btn-ghost btn-sm" onclick="SuperAdmin.openMethodForm('${m.id}')">تعديل</button>
@@ -612,6 +738,9 @@ SuperAdmin.openMethodForm = function(id){
   UI.openModal(id?'تعديل طريقة دفع':'إضافة طريقة دفع', `
     <div class="field"><label>اسم الطريقة</label><input id="f-name" value="${esc(m.name||'')}" placeholder="مثال: فودافون كاش"></div>
     <div class="field"><label>الرقم / الحساب</label><input id="f-details" value="${esc(m.details||'')}" placeholder="مثال: 010xxxxxxxx"></div>
+    <div class="field"><label>صورة / QR كود (اختياري)</label><input type="file" id="f-qr" accept="image/*">
+      ${m.qrImage? `<img src="${m.qrImage}" style="max-width:160px; margin-top:8px; border-radius:8px; border:1px solid var(--line);">`:''}
+    </div>
     <div class="field"><label>تعليمات إضافية (اختياري)</label><textarea id="f-instructions" rows="2">${esc(m.instructions||'')}</textarea></div>
     <div class="field"><label><input type="checkbox" id="f-active" ${m.active!==false?'checked':''}> مفعّلة (تظهر للكنايس)</label></div>
   `, `<button class="btn btn-primary" onclick="SuperAdmin.saveMethod('${id||''}')">حفظ</button><button class="btn btn-ghost" onclick="UI.closeModal()">إلغاء</button>`);
@@ -621,7 +750,9 @@ SuperAdmin.saveMethod = async function(id){
   const details = document.getElementById('f-details').value.trim();
   if(!name||!details) return toast('أدخل اسم الطريقة والرقم/الحساب');
   const data = { name, details, instructions: document.getElementById('f-instructions').value.trim(), active: document.getElementById('f-active').checked };
+  const qrFile = document.getElementById('f-qr').files[0];
   try{
+    if(qrFile) data.qrImage = await compressImage(qrFile, 500, 0.7);
     if(id) await updateDoc(doc(dbFire,'paymentMethods',id), data);
     else await addDoc(collection(dbFire,'paymentMethods'), data);
     UI.closeModal(); toast('تم الحفظ بنجاح');
@@ -704,13 +835,27 @@ SuperAdmin.renderChats = function(el){
     <div class="card" style="display:flex; flex-direction:column; height:60vh;">
       <div style="padding:12px 16px; border-bottom:1px solid var(--line); font-weight:700; color:var(--navy);">${esc(c?c.name:'')}</div>
       <div id="sa-chat-messages" style="flex:1; overflow-y:auto; padding:16px;"></div>
-      <div style="display:flex; gap:8px; padding:12px; border-top:1px solid var(--line);">
+      <div style="display:flex; gap:8px; padding:12px; border-top:1px solid var(--line); align-items:center;">
+        <label class="btn btn-ghost btn-sm" style="margin:0; cursor:pointer;">📎<input type="file" id="sa-chat-file" accept="image/*" style="display:none;" onchange="SuperAdmin.previewChatFile()"></label>
         <input id="sa-chat-input" placeholder="اكتب ردك..." style="flex:1; padding:10px 12px; border:1px solid var(--line); border-radius:8px;" onkeydown="if(event.key==='Enter') SuperAdmin.sendChat()">
         <button class="btn btn-primary" onclick="SuperAdmin.sendChat()">إرسال</button>
       </div>
+      <div id="sa-chat-file-preview" style="display:none; padding:0 12px 12px;"></div>
     </div>
   `;
   SuperAdmin.renderChatMessages();
+};
+SuperAdmin.previewChatFile = function(){
+  const file = document.getElementById('sa-chat-file').files[0];
+  const box = document.getElementById('sa-chat-file-preview');
+  if(!file){ box.style.display='none'; box.innerHTML=''; return; }
+  box.style.display='block';
+  box.innerHTML = `<span class="pill pill-active">📎 ${esc(file.name)}</span> <button class="btn btn-ghost btn-sm" onclick="SuperAdmin.clearChatFile()">إلغاء</button>`;
+};
+SuperAdmin.clearChatFile = function(){
+  document.getElementById('sa-chat-file').value='';
+  const box = document.getElementById('sa-chat-file-preview');
+  box.style.display='none'; box.innerHTML='';
 };
 SuperAdmin.openChat = function(churchId){
   SA_CHAT_CHURCH_ID = churchId;
@@ -734,7 +879,8 @@ SuperAdmin.renderChatMessages = function(){
     return `<div style="display:flex; ${mine?'justify-content:flex-end;':'justify-content:flex-start;'} margin-bottom:10px;">
       <div style="max-width:72%; padding:9px 13px; border-radius:12px; font-size:13.5px; ${mine?'background:var(--navy); color:#fff;':'background:var(--paper); color:var(--ink);'}">
         <div style="font-size:11px; opacity:.7; margin-bottom:3px;">${esc(m.senderName)}</div>
-        ${esc(m.text)}
+        ${m.imageBase64? `<img src="${m.imageBase64}" style="max-width:100%; border-radius:8px; margin-bottom:${m.text?'6px':'0'}; cursor:pointer;" onclick="window.open('${m.imageBase64}','_blank')">` : ''}
+        ${m.text? esc(m.text) : ''}
       </div>
     </div>`;
   }).join('') : `<p class="muted" style="text-align:center; margin-top:30px;">لا توجد رسائل بعد.</p>`;
@@ -742,13 +888,16 @@ SuperAdmin.renderChatMessages = function(){
 };
 SuperAdmin.sendChat = async function(){
   const input = document.getElementById('sa-chat-input');
+  const fileInput = document.getElementById('sa-chat-file');
   const text = input.value.trim();
-  if(!text || !SA_CHAT_CHURCH_ID) return;
+  const file = fileInput.files[0];
+  if((!text && !file) || !SA_CHAT_CHURCH_ID) return;
   input.value='';
   try{
-    await addDoc(collection(dbFire,'chatMessages'), {
-      churchId: SA_CHAT_CHURCH_ID, senderRole:'superadmin', senderName: CURRENT_USER.name, text, createdAt: Date.now(),
-    });
+    const payload = { churchId: SA_CHAT_CHURCH_ID, senderRole:'superadmin', senderName: CURRENT_USER.name, text, createdAt: Date.now() };
+    if(file) payload.imageBase64 = await compressImage(file, 900, 0.6);
+    await addDoc(collection(dbFire,'chatMessages'), payload);
+    SuperAdmin.clearChatFile();
   }catch(e){ console.error(e); toast('تعذر إرسال الرسالة: '+e.message); }
 };
 
@@ -771,14 +920,16 @@ const NAV_ITEMS = [
   {id:'settings', label:'الإعدادات', ic:'⚙', adminOnly:true},
   {id:'backup', label:'النسخ الاحتياطي', ic:'⟲', adminOnly:true},
 ];
+let IMPERSONATING = false; // true لما المالك يدخل مؤقتًا للوحة كنيسة معينة
 function buildNav(){
   const nav = document.getElementById('nav');
   nav.innerHTML = NAV_ITEMS
-    .filter(it=> !it.adminOnly || (CURRENT_USER && CURRENT_USER.role==='admin'))
+    .filter(it=> !it.adminOnly || (CURRENT_USER && (CURRENT_USER.role==='admin' || IMPERSONATING)))
     .map(it=>`<li><a class="nav-a" data-page="${it.id}" onclick="App.navigate('${it.id}')"><span class="ic">${it.ic}</span>${it.label}</a></li>`).join('');
 }
 App.navigate = function(page, param){
   CURRENT_PAGE = page; CURRENT_PARAM = param;
+  UI.closeSidebar();
   document.querySelectorAll('#nav a').forEach(a=>a.classList.toggle('active', a.dataset.page===page));
   const item = NAV_ITEMS.find(i=>i.id===page);
   document.getElementById('page-title').textContent = item?item.label:'';
@@ -801,6 +952,12 @@ UI.openModal = function(title, bodyHtml, footHtml){
   document.getElementById('modal-backdrop').classList.add('open');
 };
 UI.closeModal = function(){ document.getElementById('modal-backdrop').classList.remove('open'); };
+
+/* قائمة جانبية للموبايل (سحب/إخفاء) */
+UI.openSidebar = function(){ document.getElementById('sidebar').classList.add('open'); document.getElementById('sidebar-backdrop').classList.add('open'); };
+UI.closeSidebar = function(){ document.getElementById('sidebar').classList.remove('open'); document.getElementById('sidebar-backdrop').classList.remove('open'); };
+UI.openSaSidebar = function(){ document.getElementById('sa-sidebar').classList.add('open'); document.getElementById('sa-sidebar-backdrop').classList.add('open'); };
+UI.closeSaSidebar = function(){ document.getElementById('sa-sidebar').classList.remove('open'); document.getElementById('sa-sidebar-backdrop').classList.remove('open'); };
 
 function selectOptions(list, selectedId, placeholder){
   let h = placeholder!==false ? `<option value="">${placeholder||'— اختر —'}</option>` : '';
@@ -854,7 +1011,7 @@ Views.dashboard = function(){
     <div class="dash-grid">
       <div class="card card-pad">
         <div class="section-head"><h2>نسبة الحضور الشهرية</h2></div>
-        <div style="font-size:38px;font-weight:800;color:var(--navy);font-family:'Cairo',sans-serif;">${monthPresentPct}%</div>
+        <div style="font-size:38px;font-weight:800;color:var(--navy);font-family:'Markazi Text',serif;">${monthPresentPct}%</div>
         <div style="height:10px;background:var(--paper);border-radius:99px;overflow:hidden;margin-top:10px;">
           <div style="height:100%;width:${monthPresentPct}%;background:var(--present);"></div>
         </div>
@@ -1561,8 +1718,8 @@ Activities.remove = async function(id){
 /* ---------- Reports ---------- */
 Views.reports = function(){
   $content().innerHTML = `
-    <div class="section-head"><h2>مركز التقارير</h2></div>
-    <div class="info-card-grid">
+    <div class="section-head no-print"><h2>مركز التقارير</h2></div>
+    <div class="info-card-grid no-print">
       ${reportCard('كشف جميع المخدومين','قائمة كاملة ببيانات المخدومين مع المرحلة والفصل والحالة.','Reports.membersList()')}
       ${reportCard('كشف حضور خلال فترة','تقرير حضور وغياب تفصيلي حسب المرحلة/الفصل وفترة زمنية.','Reports.attendanceRange()')}
       ${reportCard('تقرير الحضور الإجمالي','إجمالي أيام الحضور والغياب ونسبة الحضور لكل مخدوم.','Reports.attendanceTotal()')}
@@ -1661,42 +1818,91 @@ Reports.activitiesReport = function(){
 
 /* ---------- Users & permissions ---------- */
 Views.users = function(){
-  listPage({
-    title:'المستخدمون والصلاحيات', addLabel:'إضافة مستخدم', onAdd:'UsersV.openForm()',
-    searchFields:['email','name'],
-    rows:()=>DB.users,
-    columns:[
-      {h:'الاسم', key:'name'}, {h:'البريد الإلكتروني', key:'email'}, {h:'الدور', render:u=>ROLE_LABELS[u.role]||u.role},
-      {h:'', render:u=>`<div class="row-actions"><button class="btn btn-ghost btn-sm" onclick="UsersV.openForm('${u.id}')">تعديل</button>${u.id!==CURRENT_USER.uid?`<button class="btn btn-danger btn-sm" onclick="UsersV.remove('${u.id}')">حذف</button>`:''}</div>`},
-    ]
-  });
+  $content().innerHTML = `
+    <div class="section-head"><h2>المستخدمون والصلاحيات</h2>
+      <button class="btn btn-gold btn-sm no-print" onclick="UsersV.openInviteForm()">+ دعوة مستخدم جديد</button>
+    </div>
+    <div class="section-head"><h2 style="font-size:14.5px;">دعوات مُعلّقة (لسه محتاجة الشخص يكمّل التسجيل)</h2></div>
+    <div class="card" style="margin-bottom:22px;"><div id="invites-table-wrap"></div></div>
+    <div class="section-head"><h2 style="font-size:14.5px;">المستخدمون المُفعّلون</h2></div>
+    <div class="card"><div id="users-table-wrap"></div></div>
+  `;
+  const uRows = DB.users;
+  document.getElementById('users-table-wrap').innerHTML = uRows.length ? `<table><thead><tr><th>الاسم</th><th>البريد الإلكتروني</th><th>الدور</th><th></th></tr></thead>
+    <tbody>${uRows.map(u=>`<tr><td>${esc(u.name)}</td><td class="muted">${esc(u.email)}</td><td>${ROLE_LABELS[u.role]||u.role}</td>
+      <td><div class="row-actions"><button class="btn btn-ghost btn-sm" onclick="UsersV.openForm('${u.id}')">تعديل الدور</button>${u.id!==CURRENT_USER.uid?`<button class="btn btn-danger btn-sm" onclick="UsersV.remove('${u.id}')">حذف</button>`:''}</div></td>
+    </tr>`).join('')}</tbody></table>` : `<div class="empty-state">لا يوجد مستخدمون بعد</div>`;
+
+  UsersV.loadInvites();
 };
 const UsersV = {};
-UsersV.openForm = function(id){
-  const u = id?byId(DB.users,id):{};
-  UI.openModal(id?'تعديل مستخدم':'إضافة مستخدم', `
-    <p class="muted" style="margin-top:0;">لإضافة مستخدم جديد لأول مرة: تواصل مع الدعم الفني (عن طريق صفحة "الدردشة مع الإدارة") لإنشاء حساب الدخول بالبريد المطلوب، وبعد إنشائه هيديك معرّف المستخدم (UID) عشان تضيفه هنا وتحدد دوره.</p>
+UsersV.loadInvites = async function(){
+  const wrap = document.getElementById('invites-table-wrap');
+  if(!wrap) return;
+  try{
+    const snap = await getDocs(query(collection(dbFire,'invites'), where('churchId','==',CURRENT_CHURCH_ID)));
+    const invites = snap.docs.map(d=>({id:d.id, ...d.data()})).filter(i=>!i.used);
+    wrap.innerHTML = invites.length ? `<table><thead><tr><th>الاسم</th><th>البريد الإلكتروني</th><th>الدور</th><th></th></tr></thead>
+      <tbody>${invites.map(i=>`<tr><td>${esc(i.name||'—')}</td><td class="muted">${esc(i.email)}</td><td>${ROLE_LABELS[i.role]||i.role}</td>
+        <td><button class="btn btn-danger btn-sm" onclick="UsersV.cancelInvite('${i.id}')">إلغاء الدعوة</button></td>
+      </tr>`).join('')}</tbody></table>` : `<div class="empty-state">لا توجد دعوات معلّقة</div>`;
+  }catch(e){ console.error(e); wrap.innerHTML = `<div class="empty-state">تعذر تحميل الدعوات</div>`; }
+};
+UsersV.openInviteForm = function(){
+  UI.openModal('دعوة مستخدم جديد', `
+    <p class="muted" style="margin-top:0;">هيتولّد رابط دعوة، ابعته للشخص (واتساب مثلاً)، وهو هيدخل بريده وكلمة مرور من عنده ويتفعّل تلقائيًا بالدور اللي هتحدده.</p>
     <div class="form-grid">
-      <div class="field full"><label>معرّف المستخدم (UID)</label><input id="f-uid" value="${esc(id||'')}" ${id?'disabled':''} placeholder="هتستلمه من الدعم الفني بعد إنشاء الحساب"></div>
-      <div class="field"><label>الاسم</label><input id="f-name" value="${esc(u.name||'')}"></div>
-      <div class="field"><label>البريد الإلكتروني</label><input id="f-email" value="${esc(u.email||'')}"></div>
-      <div class="field"><label>الدور</label><select id="f-role">
+      <div class="field"><label>اسم الشخص</label><input id="inv-name"></div>
+      <div class="field"><label>البريد الإلكتروني</label><input id="inv-email" type="email"></div>
+      <div class="field full"><label>الدور</label><select id="inv-role">
+        <option value="servant">خادم</option>
+        <option value="staff">مستخدم إداري</option>
+        <option value="admin">مدير النظام</option>
+      </select></div>
+    </div>
+  `, `<button class="btn btn-primary" onclick="UsersV.sendInvite()">إرسال الدعوة</button><button class="btn btn-ghost" onclick="UI.closeModal()">إلغاء</button>`);
+};
+UsersV.sendInvite = async function(){
+  const name = document.getElementById('inv-name').value.trim();
+  const email = document.getElementById('inv-email').value.trim().toLowerCase();
+  const role = document.getElementById('inv-role').value;
+  if(!name || !email) return toast('أدخل الاسم والبريد الإلكتروني');
+  try{
+    await setDoc(doc(dbFire,'invites', email), {
+      name, email, role, churchId: CURRENT_CHURCH_ID, churchName: CURRENT_CHURCH?CURRENT_CHURCH.name:'',
+      used:false, createdAt: Date.now(),
+    });
+    await log('دعوة مستخدم جديد', name+' - '+email);
+    UI.closeModal();
+    toast('تم إرسال الدعوة — قوله يفتح صفحة "عندك دعوة؟ انضم هنا" من شاشة الدخول ويسجّل بنفس البريد ده');
+    UsersV.loadInvites();
+  }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
+};
+UsersV.cancelInvite = async function(email){
+  if(!confirm('إلغاء الدعوة دي؟')) return;
+  try{ await deleteDoc(doc(dbFire,'invites', email)); toast('تم الإلغاء'); UsersV.loadInvites(); }
+  catch(e){ console.error(e); toast('تعذر الحذف: '+e.message); }
+};
+UsersV.openForm = function(id){
+  const u = byId(DB.users,id);
+  if(!u) return;
+  UI.openModal('تعديل دور المستخدم', `
+    <div class="form-grid">
+      <div class="field"><label>الاسم</label><input id="f-name" value="${esc(u.name||'')}" disabled></div>
+      <div class="field"><label>البريد الإلكتروني</label><input value="${esc(u.email||'')}" disabled></div>
+      <div class="field full"><label>الدور</label><select id="f-role">
         <option value="admin" ${u.role==='admin'?'selected':''}>مدير النظام</option>
         <option value="servant" ${u.role==='servant'?'selected':''}>خادم</option>
         <option value="staff" ${u.role==='staff'?'selected':''}>مستخدم إداري</option>
       </select></div>
     </div>
-  `, `<button class="btn btn-primary" onclick="UsersV.save('${id||''}')">حفظ</button><button class="btn btn-ghost" onclick="UI.closeModal()">إلغاء</button>`);
+  `, `<button class="btn btn-primary" onclick="UsersV.save('${id}')">حفظ</button><button class="btn btn-ghost" onclick="UI.closeModal()">إلغاء</button>`);
 };
 UsersV.save = async function(id){
-  const uid_ = id || document.getElementById('f-uid').value.trim();
-  const name = document.getElementById('f-name').value.trim();
-  const email = document.getElementById('f-email').value.trim();
-  if(!uid_||!name) return toast('أدخل المعرّف (UID) والاسم');
-  const data = { name, email, role:document.getElementById('f-role').value, churchId: CURRENT_CHURCH_ID };
+  const role = document.getElementById('f-role').value;
   try{
-    await fsSet('users', uid_, data);
-    await log(id?'تعديل مستخدم':'إضافة مستخدم', name);
+    await fsUpdate('users', id, {role});
+    await log('تعديل دور مستخدم', byId(DB.users,id)?.name||'');
     UI.closeModal(); toast('تم الحفظ بنجاح'); App.navigate('users');
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
 };
@@ -1833,7 +2039,7 @@ Views.billing = function(){
       <div class="info-card-grid" style="margin-bottom:20px;">
         ${methods.map(m=>`<div class="card card-pad">
           <h3 style="font-size:14.5px; margin:0 0 6px;">${esc(m.name)}</h3>
-          <div style="font-size:17px; font-weight:800; color:var(--navy); font-family:'Cairo',sans-serif;">${esc(m.details)}</div>
+          <div style="font-size:17px; font-weight:800; color:var(--navy); font-family:'Markazi Text',serif;">${esc(m.details)}</div>
           ${m.instructions? `<p class="muted" style="margin-top:8px;">${esc(m.instructions)}</p>`:''}
         </div>`).join('')}
       </div>
@@ -1885,13 +2091,27 @@ Views.chat = function(){
     <div class="section-head"><h2>الدردشة مع الإدارة</h2></div>
     <div class="card" style="display:flex; flex-direction:column; height:60vh;">
       <div id="chat-messages" style="flex:1; overflow-y:auto; padding:16px;"></div>
-      <div style="display:flex; gap:8px; padding:12px; border-top:1px solid var(--line);">
+      <div style="display:flex; gap:8px; padding:12px; border-top:1px solid var(--line); align-items:center;">
+        <label class="btn btn-ghost btn-sm" style="margin:0; cursor:pointer;">📎<input type="file" id="chat-file" accept="image/*" style="display:none;" onchange="Chat.previewFile()"></label>
         <input id="chat-input" placeholder="اكتب رسالتك..." style="flex:1; padding:10px 12px; border:1px solid var(--line); border-radius:8px;" onkeydown="if(event.key==='Enter') Chat.send()">
         <button class="btn btn-primary" onclick="Chat.send()">إرسال</button>
       </div>
+      <div id="chat-file-preview" style="display:none; padding:0 12px 12px;"></div>
     </div>
   `;
   Chat.renderMessages();
+};
+Chat.previewFile = function(){
+  const file = document.getElementById('chat-file').files[0];
+  const box = document.getElementById('chat-file-preview');
+  if(!file){ box.style.display='none'; box.innerHTML=''; return; }
+  box.style.display='block';
+  box.innerHTML = `<span class="pill pill-active">📎 ${esc(file.name)}</span> <button class="btn btn-ghost btn-sm" onclick="Chat.clearFile()">إلغاء</button>`;
+};
+Chat.clearFile = function(){
+  document.getElementById('chat-file').value='';
+  const box = document.getElementById('chat-file-preview');
+  box.style.display='none'; box.innerHTML='';
 };
 Chat.renderMessages = function(){
   const el = document.getElementById('chat-messages');
@@ -1902,7 +2122,8 @@ Chat.renderMessages = function(){
     return `<div style="display:flex; ${mine?'justify-content:flex-start;':'justify-content:flex-end;'} margin-bottom:10px;">
       <div style="max-width:72%; padding:9px 13px; border-radius:12px; font-size:13.5px; ${mine?'background:var(--paper); color:var(--ink);':'background:var(--navy); color:#fff;'}">
         <div style="font-size:11px; opacity:.7; margin-bottom:3px;">${esc(m.senderName)}</div>
-        ${esc(m.text)}
+        ${m.imageBase64? `<img src="${m.imageBase64}" style="max-width:100%; border-radius:8px; margin-bottom:${m.text?'6px':'0'}; cursor:pointer;" onclick="window.open('${m.imageBase64}','_blank')">` : ''}
+        ${m.text? esc(m.text) : ''}
       </div>
     </div>`;
   }).join('') : `<p class="muted" style="text-align:center; margin-top:30px;">ابدأ المحادثة مع الإدارة من هنا.</p>`;
@@ -1910,14 +2131,19 @@ Chat.renderMessages = function(){
 };
 Chat.send = async function(){
   const input = document.getElementById('chat-input');
+  const fileInput = document.getElementById('chat-file');
   const text = input.value.trim();
-  if(!text) return;
+  const file = fileInput.files[0];
+  if(!text && !file) return;
   input.value='';
   try{
-    await fsAddRaw('chatMessages', {
-      churchId: CURRENT_CHURCH_ID, senderRole: CURRENT_USER.role, senderName: CURRENT_USER.name,
+    const payload = {
+      churchId: CURRENT_CHURCH_ID, senderRole: IMPERSONATING?'admin':CURRENT_USER.role, senderName: CURRENT_USER.name,
       text, createdAt: Date.now(),
-    });
+    };
+    if(file) payload.imageBase64 = await compressImage(file, 900, 0.6);
+    await fsAddRaw('chatMessages', payload);
+    Chat.clearFile();
   }catch(e){ console.error(e); toast('تعذر إرسال الرسالة: '+e.message); }
 };
 window.Chat = Chat;

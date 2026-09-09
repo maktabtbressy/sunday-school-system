@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>نظام إدارة مدارس الأحد</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@500;700;800&family=Tajawal:wght@400;500;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Markazi+Text:wght@500;600;700&family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
@@ -25,8 +25,42 @@
     </div>
     <p class="login-error" id="login-error">البريد الإلكتروني أو كلمة المرور غير صحيحة</p>
     <button class="btn btn-primary btn-block" id="login-btn" onclick="App.login()">دخول</button>
+    <p class="auth-switch" style="margin-top:10px;"><a onclick="App.showForgot()">نسيت كلمة المرور؟</a></p>
     <p class="login-hint">النظام متصل بسيرفر مركزي آمن — بياناتكم محفوظة لحظيًا ومتاحة من أي جهاز تسجّلون الدخول منه.</p>
     <p class="auth-switch">مسؤول كنيسة جديدة؟ <a onclick="App.showRegister()">سجّل هنا</a></p>
+    <p class="auth-switch">عندك دعوة من كنيستك؟ <a onclick="App.showJoin()">انضم هنا</a></p>
+  </div>
+</div>
+
+<div id="join-screen" style="display:none;">
+  <div class="login-card">
+    <p class="brand">الانضمام بدعوة</p>
+    <p class="brand-sub">أدخل نفس البريد الإلكتروني اللي دعاك بيه مسؤول كنيستك</p>
+    <div class="field">
+      <label>البريد الإلكتروني</label>
+      <input id="join-email" type="email" placeholder="name@example.com">
+    </div>
+    <div class="field">
+      <label>كلمة مرور جديدة</label>
+      <input id="join-pass" type="password" placeholder="6 أحرف على الأقل">
+    </div>
+    <p class="login-error" id="join-error"></p>
+    <button class="btn btn-gold btn-block" id="join-btn" onclick="App.submitJoin()">تفعيل حسابي</button>
+    <p class="auth-switch">عندك حساب بالفعل؟ <a onclick="App.showLogin()">سجّل دخول</a></p>
+  </div>
+</div>
+
+<div id="forgot-screen" style="display:none;">
+  <div class="login-card">
+    <p class="brand">استعادة كلمة المرور</p>
+    <p class="brand-sub">هنبعتلك رابط لإعادة تعيين كلمة المرور على بريدك</p>
+    <div class="field">
+      <label>البريد الإلكتروني</label>
+      <input id="forgot-email" type="email" placeholder="name@example.com">
+    </div>
+    <p class="login-error" id="forgot-error"></p>
+    <button class="btn btn-gold btn-block" id="forgot-btn" onclick="App.submitForgot()">إرسال رابط الاستعادة</button>
+    <p class="auth-switch">تذكرت كلمة المرور؟ <a onclick="App.showLogin()">رجوع لتسجيل الدخول</a></p>
   </div>
 </div>
 
@@ -78,6 +112,7 @@
 
 <div id="app" style="display:none;">
 
+  <div id="sidebar-backdrop" onclick="UI.closeSidebar()"></div>
   <aside id="sidebar">
     <div class="brand-box">
       <p class="brand">إدارة مدارس الأحد</p>
@@ -87,11 +122,13 @@
     <div class="user-box">
       <b id="current-user-name">—</b>
       <span id="current-user-role">—</span><br>
+      <span class="logout-link" id="exit-impersonation-link" style="display:none;" onclick="App.exitImpersonation()">↩ رجوع للوحة المالك</span>
       <span class="logout-link" onclick="App.logout()">تسجيل الخروج</span>
     </div>
   </aside>
   <div id="main">
     <div id="topbar">
+      <button class="hamburger-btn no-print" onclick="UI.openSidebar()">☰</button>
       <div class="page-title" id="page-title">لوحة التحكم</div>
       <div class="search-box no-print">
         <input id="global-search" placeholder="بحث بالاسم، الكود، الهاتف..." oninput="App.globalSearch(this.value)" onblur="setTimeout(()=>document.getElementById('search-results').style.display='none',150)">
@@ -103,6 +140,7 @@
 </div>
 
 <div id="superadmin-app" style="display:none;">
+  <div id="sa-sidebar-backdrop" onclick="UI.closeSaSidebar()"></div>
   <aside id="sa-sidebar">
     <div class="brand-box">
       <p class="brand">لوحة المالك</p>
@@ -123,6 +161,7 @@
   </aside>
   <div id="sa-main">
     <div id="sa-topbar">
+      <button class="hamburger-btn" onclick="UI.openSaSidebar()">☰</button>
       <div class="page-title" id="sa-page-title">الكنايس</div>
     </div>
     <div id="sa-content"></div>
