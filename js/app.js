@@ -640,7 +640,7 @@ let SA_CHAT_CHURCH_ID = null;
 let SA_CHAT_MESSAGES = [];
 let SA_UNREAD_BY_CHURCH = {}; // churchId -> عدد رسائل الكنيسة اللي لسه المالك مقراهاش
 let SA_TICKETS = [];
-let SA_TICKET_FILTERS = {type:'', status:'', search:''};
+let SA_TICKET_FILTERS = {type:'', status:'', search:'', from:'', to:''};
 let SA_PAGE = 'churches';
 let saUnsub = null, saMethodsUnsub = null, saProofsUnsub = null, saChatUnsub = null, saChatsUnreadUnsub = null, saTicketsUnsub = null, saTicketTypesUnsub = null;
 
@@ -1166,40 +1166,66 @@ SuperAdmin.sendChat = async function(){
 };
 
 /* ---- التذاكر (الدعم الفني/الشكاوى) عبر كل الكنايس ---- */
+/* أنواع تذاكر افتراضية مناسبة لسياق نظام إدارة مدارس الأحد (SaaS) */
+const DEFAULT_TICKET_TYPES = [
+  'استفسار عن الاشتراك أو الاستخدام',
+  'مشكلة في الدفع أو الفاتورة',
+  'مشكلة تقنية أو خطأ في النظام',
+  'طلب تعديل بيانات الكنيسة',
+  'مشكلة في تسجيل الدخول أو الحساب',
+  'شكوى بخصوص جودة الخدمة',
+  'اقتراح أو ملاحظة عامة',
+  'شكوى أخرى',
+];
+let SA_SEEDING_TICKET_TYPES = false;
+SuperAdmin.seedDefaultTicketTypes = async function(){
+  if(SA_SEEDING_TICKET_TYPES) return;
+  SA_SEEDING_TICKET_TYPES = true;
+  try{ await setDoc(doc(dbFire,'ticketTypes','main'), { types: DEFAULT_TICKET_TYPES }, {merge:true}); }
+  catch(e){ console.error(e); }
+  finally{ SA_SEEDING_TICKET_TYPES = false; }
+};
 SuperAdmin.renderTickets = function(el){
   const types = TICKET_TYPES;
+  if(!types.length && !SA_SEEDING_TICKET_TYPES) SuperAdmin.seedDefaultTicketTypes();
   let filtered = SA_TICKETS.slice();
   if(SA_TICKET_FILTERS.type) filtered = filtered.filter(t=>t.type===SA_TICKET_FILTERS.type);
   if(SA_TICKET_FILTERS.status) filtered = filtered.filter(t=>t.status===SA_TICKET_FILTERS.status);
   if(SA_TICKET_FILTERS.search) filtered = filtered.filter(t=> (t.ticketNo||'').toLowerCase().includes(SA_TICKET_FILTERS.search.toLowerCase()));
+  if(SA_TICKET_FILTERS.from) filtered = filtered.filter(t=> new Date(t.createdAt).toISOString().slice(0,10) >= SA_TICKET_FILTERS.from);
+  if(SA_TICKET_FILTERS.to) filtered = filtered.filter(t=> new Date(t.createdAt).toISOString().slice(0,10) <= SA_TICKET_FILTERS.to);
 
   el.innerHTML = `
     <div class="card card-pad" style="margin-bottom:16px;">
-      <b style="font-size:13px; display:block; margin-bottom:8px;">أنواع التذاكر</b>
+      <b style="font-size:13px; display:block; margin-bottom:8px;">🎫 أنواع الشكاوى (تظهر للعميل عند فتح تذكرة)</b>
       <div style="display:flex; gap:8px; margin-bottom:10px;">
-        <input id="new-ticket-type" placeholder="اكتب نوع جديد..." style="flex:1; padding:8px 10px; border:1px solid var(--line); border-radius:8px;">
+        <input id="new-ticket-type" placeholder="اكتب نوع شكوى جديد..." style="flex:1; padding:8px 10px; border:1px solid var(--line); border-radius:8px;" onkeydown="if(event.key==='Enter'){SuperAdmin.addTicketType();}">
         <button class="btn btn-primary btn-sm" onclick="SuperAdmin.addTicketType()">+ إضافة</button>
       </div>
-      <div style="display:flex; flex-wrap:wrap; gap:6px;">
-        ${types.length ? types.map(t=>`<span class="pill status-pending" style="display:inline-flex; align-items:center; gap:6px;">${esc(t)} <a style="cursor:pointer; color:var(--absent); font-weight:900;" onclick="SuperAdmin.removeTicketType('${esc(t).replace(/'/g,"\\'")}')">✖</a></span>`).join('') : `<span class="muted">لا توجد أنواع مضافة بعد — أضف أول نوع فوق.</span>`}
+      <div style="display:flex; flex-wrap:wrap; gap:8px;">
+        ${types.length ? types.map(t=>`<span class="pill status-pending" style="display:inline-flex; align-items:center; gap:8px; padding:6px 12px;">
+            ${esc(t)}
+            <a style="cursor:pointer;" title="تعديل" onclick="SuperAdmin.editTicketType('${esc(t).replace(/'/g,"\\'")}')">✏️</a>
+            <a style="cursor:pointer; color:var(--absent);" title="حذف" onclick="SuperAdmin.removeTicketType('${esc(t).replace(/'/g,"\\'")}')">✖</a>
+          </span>`).join('') : `<span class="muted">جاري تجهيز قائمة افتراضية...</span>`}
       </div>
     </div>
 
-    <div class="card card-pad" style="margin-bottom:16px; display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end;">
-      <div class="field" style="margin:0; min-width:140px;"><label>النوع</label>
-        <select onchange="SuperAdmin.setTicketFilter('type', this.value)">
-          <option value="">الكل</option>
-          ${types.map(t=>`<option value="${esc(t)}" ${SA_TICKET_FILTERS.type===t?'selected':''}>${esc(t)}</option>`).join('')}
-        </select>
+    <div class="card card-pad" style="margin-bottom:16px;">
+      <div class="toolbar">
+        <div class="field" style="margin:0;"><label>من الفترة</label><input type="date" id="tk-f-from" value="${SA_TICKET_FILTERS.from||''}"></div>
+        <div class="field" style="margin:0;"><label>الي الفترة</label><input type="date" id="tk-f-to" value="${SA_TICKET_FILTERS.to||''}"></div>
+        <div class="field" style="margin:0;"><label>نوع الشكوي</label>
+          <select id="tk-f-type"><option value="">الكل</option>${types.map(t=>`<option value="${esc(t)}" ${SA_TICKET_FILTERS.type===t?'selected':''}>${esc(t)}</option>`).join('')}</select>
+        </div>
+        <div class="field" style="margin:0;"><label>الحالة</label>
+          <select id="tk-f-status"><option value="">الكل</option>${Object.keys(TICKET_STATUS_CLASS).map(s=>`<option value="${s}" ${SA_TICKET_FILTERS.status===s?'selected':''}>${s}</option>`).join('')}</select>
+        </div>
+        <div class="field" style="margin:0;"><label>بحث برقم التذكرة</label><input id="tk-f-search" value="${esc(SA_TICKET_FILTERS.search)}" placeholder="مثال: TKT-558163"></div>
       </div>
-      <div class="field" style="margin:0; min-width:140px;"><label>الحالة</label>
-        <select onchange="SuperAdmin.setTicketFilter('status', this.value)">
-          <option value="">الكل</option>
-          ${Object.keys(TICKET_STATUS_CLASS).map(s=>`<option value="${s}" ${SA_TICKET_FILTERS.status===s?'selected':''}>${s}</option>`).join('')}
-        </select>
-      </div>
-      <div class="field" style="margin:0; flex:1; min-width:160px;"><label>بحث برقم التذكرة</label>
-        <input value="${esc(SA_TICKET_FILTERS.search)}" placeholder="مثال: TKT-558163" oninput="SuperAdmin.setTicketFilter('search', this.value)">
+      <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:10px;">
+        <button class="btn btn-ghost btn-sm" onclick="SuperAdmin.resetTicketFilters()">إعادة تعيين</button>
+        <button class="btn btn-primary btn-sm" onclick="SuperAdmin.applyTicketFilters()">عرض التذاكر</button>
       </div>
     </div>
 
@@ -1213,10 +1239,21 @@ SuperAdmin.renderTickets = function(el){
           </div>
           ${ticketStatusPill(t.status)}
         </div>`;
-      }).join('') : `<p class="muted" style="padding:16px;">لا توجد تذاكر مطابقة لهذا الفلتر.</p>`}
+      }).join('') : `<p class="muted" style="padding:16px;">لا توجد تذاكر تحتاج متابعة حاليًا. استخدم الفلترة فوق لعرض كل التذاكر (بما فيها المقفولة والملغاة).</p>`}
     </div>
   `;
 };
+SuperAdmin.applyTicketFilters = function(){
+  SA_TICKET_FILTERS = {
+    type: document.getElementById('tk-f-type').value,
+    status: document.getElementById('tk-f-status').value,
+    search: document.getElementById('tk-f-search').value.trim(),
+    from: document.getElementById('tk-f-from').value,
+    to: document.getElementById('tk-f-to').value,
+  };
+  SuperAdmin.render();
+};
+SuperAdmin.resetTicketFilters = function(){ SA_TICKET_FILTERS = {type:'', status:'', search:'', from:'', to:''}; SuperAdmin.render(); };
 SuperAdmin.addTicketType = async function(){
   const input = document.getElementById('new-ticket-type');
   const val = input.value.trim();
@@ -1225,12 +1262,23 @@ SuperAdmin.addTicketType = async function(){
   try{ await setDoc(doc(dbFire,'ticketTypes','main'), { types:[...TICKET_TYPES, val] }, {merge:true}); input.value=''; }
   catch(e){ console.error(e); toast('تعذر الإضافة: '+e.message); }
 };
+SuperAdmin.editTicketType = async function(oldName){
+  const newName = prompt('عدّل اسم نوع الشكوى:', oldName);
+  if(newName===null) return; // إلغاء
+  const val = newName.trim();
+  if(!val || val===oldName) return;
+  if(TICKET_TYPES.includes(val)){ toast('النوع ده موجود بالفعل'); return; }
+  try{
+    const updated = TICKET_TYPES.map(t=> t===oldName ? val : t);
+    await setDoc(doc(dbFire,'ticketTypes','main'), { types: updated }, {merge:true});
+    toast('تم التعديل (التذاكر القديمة بنفس النوع القديم هتفضل زي ما هي)');
+  }catch(e){ console.error(e); toast('تعذر التعديل: '+e.message); }
+};
 SuperAdmin.removeTicketType = async function(name){
-  if(!confirm('حذف نوع التذكرة ده؟ (مش هيأثر على التذاكر القديمة اللي مستخدماه بالفعل)')) return;
+  if(!confirm('حذف نوع الشكوى ده؟ (مش هيأثر على التذاكر القديمة اللي مستخدماه بالفعل)')) return;
   try{ await setDoc(doc(dbFire,'ticketTypes','main'), { types: TICKET_TYPES.filter(t=>t!==name) }, {merge:true}); }
   catch(e){ console.error(e); toast('تعذر الحذف: '+e.message); }
 };
-SuperAdmin.setTicketFilter = function(key, val){ SA_TICKET_FILTERS[key]=val; SuperAdmin.render(); };
 SuperAdmin.openTicketDetail = function(id){
   const t = SA_TICKETS.find(x=>x.id===id);
   if(!t) return;
