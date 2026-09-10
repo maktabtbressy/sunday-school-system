@@ -649,6 +649,9 @@ let SA_TICKETS = [];
 let SA_TICKET_FILTERS = {type:'', status:'', search:'', from:'', to:''};
 let SA_PUBLIC_CONFIG = {};
 let SA_ADMIN_LINKS = [];
+let SA_ACTIVITY_LOG = [];
+let SA_ACTIVITY_FILTERS = {from:'', to:''};
+let SA_REPORT_FILTERS = {from:'', to:'', category:''};
 let SA_PAGE = 'churches';
 let saUnsub = null, saMethodsUnsub = null, saProofsUnsub = null, saChatUnsub = null, saChatsUnreadUnsub = null, saTicketsUnsub = null, saTicketTypesUnsub = null;
 
@@ -717,8 +720,14 @@ SuperAdmin.boot = function(){
     SA_ADMIN_LINKS = snap.docs.map(d=>({id:d.id, ...d.data()}));
     if(SA_PAGE==='links') SuperAdmin.render();
   }, err=>console.error(err));
+
+  // سجل نشاط المالك (آخر 300 حركة)
+  onSnapshot(query(collection(dbFire,'superadminLog'), orderBy('date','desc'), limit(300)), snap=>{
+    SA_ACTIVITY_LOG = snap.docs.map(d=>({id:d.id, ...d.data()}));
+    if(SA_PAGE==='activity') SuperAdmin.render();
+  }, err=>console.error(err));
 };
-const SA_PAGE_TITLES = {churches:'الكنايس', requests:'طلبات جديدة', methods:'طرق الدفع', payments:'مراجعة المدفوعات', chats:'الدردشات', tickets:'التذاكر', links:'روابط'};
+const SA_PAGE_TITLES = {churches:'الكنايس', requests:'طلبات جديدة', methods:'طرق الدفع', payments:'مراجعة المدفوعات', chats:'الدردشات', tickets:'التذاكر', links:'روابط', activity:'سجل النشاط', report:'تقرير شامل'};
 SuperAdmin.navigate = function(page){
   SA_PAGE = page;
   UI.closeSaSidebar();
@@ -750,9 +759,11 @@ SuperAdmin.render = function(){
   const el = document.getElementById('sa-content');
   if(SA_PAGE==='methods'){ el.className=''; SuperAdmin.renderMethods(el); return; }
   if(SA_PAGE==='payments'){ el.className=''; SuperAdmin.renderPayments(el); return; }
+  if(SA_PAGE==='report'){ el.className=''; SuperAdmin.renderReport(el); return; }
   if(SA_PAGE==='chats'){ el.className=''; SuperAdmin.renderChats(el); return; }
   if(SA_PAGE==='tickets'){ el.className=''; SuperAdmin.renderTickets(el); return; }
   if(SA_PAGE==='links'){ el.className=''; SuperAdmin.renderLinks(el); return; }
+  if(SA_PAGE==='activity'){ el.className=''; SuperAdmin.renderActivity(el); return; }
   el.className = 'church-grid';
   if(SA_PAGE==='requests'){
     const pending = SA_CHURCHES.filter(c=>c.status==='pending');
@@ -824,10 +835,16 @@ SuperAdmin.openChurch = async function(id){
   }catch(e){ console.error(e); }
 };
 
+/* تسجيل نشاط المالك (يظهر في صفحة سجل النشاط بلوحة المالك) */
+async function saLog(action, details){
+  try{ await addDoc(collection(dbFire,'superadminLog'), {action, details: details||'', date: Date.now(), user: CURRENT_USER?CURRENT_USER.name:''}); }
+  catch(e){ console.error(e); }
+}
 SuperAdmin.approve = async function(id){
   const trialEndsAt = new Date(Date.now() + TRIAL_DAYS*86400000).toISOString();
   try{
     await updateDoc(doc(dbFire,'churches',id), {status:'trial', trialEndsAt});
+    await saLog('قبول طلب كنيسة', byId(SA_CHURCHES,id)?.name||id);
     UI.closeModal(); toast('تم قبول الكنيسة وبدء فترة تجربة '+TRIAL_DAYS+' يوم');
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
 };
@@ -835,6 +852,7 @@ SuperAdmin.reject = async function(id){
   if(!confirm('تأكيد رفض طلب هذه الكنيسة؟')) return;
   try{
     await updateDoc(doc(dbFire,'churches',id), {status:'rejected'});
+    await saLog('رفض طلب كنيسة', byId(SA_CHURCHES,id)?.name||id);
     UI.closeModal(); toast('تم رفض الطلب');
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
 };
@@ -845,6 +863,7 @@ SuperAdmin.extend = async function(id){
   const activeUntil = new Date(base + days*86400000).toISOString();
   try{
     await updateDoc(doc(dbFire,'churches',id), {status:'active', activeUntil});
+    await saLog('تمديد/تفعيل اشتراك', `${c?.name||id} — ${days} يوم`);
     UI.closeModal(); toast('تم تفعيل/تمديد الاشتراك '+days+' يوم');
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
 };
@@ -852,6 +871,7 @@ SuperAdmin.exempt = async function(id){
   if(!confirm('هتخلي الكنيسة دي مفتوحة دائمًا بدون اشتراك أو حد زمني. متابعة؟')) return;
   try{
     await updateDoc(doc(dbFire,'churches',id), {status:'exempt'});
+    await saLog('إعفاء دائم', byId(SA_CHURCHES,id)?.name||id);
     UI.closeModal(); toast('تم إعفاء الكنيسة — بقت مفتوحة دائمًا');
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
 };
@@ -859,6 +879,7 @@ SuperAdmin.deactivate = async function(id){
   if(!confirm('هل تريد إلغاء تفعيل اشتراك هذه الكنيسة فورًا؟ لن تقدر تدخل النظام إلا بعد ما تفعّل الاشتراك تاني.')) return;
   try{
     await updateDoc(doc(dbFire,'churches',id), {status:'active', activeUntil: new Date(Date.now()-1000).toISOString()});
+    await saLog('إلغاء تفعيل فوري', byId(SA_CHURCHES,id)?.name||id);
     UI.closeModal(); toast('تم إلغاء تفعيل اشتراك الكنيسة');
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
 };
@@ -866,6 +887,7 @@ SuperAdmin.unexempt = async function(id){
   if(!confirm('هترجع الكنيسة دي لنظام الاشتراك العادي (هتتقفل لو مفيش اشتراك ساري). متابعة؟')) return;
   try{
     await updateDoc(doc(dbFire,'churches',id), {status:'expired', activeUntil:null});
+    await saLog('إلغاء إعفاء', byId(SA_CHURCHES,id)?.name||id);
     UI.closeModal(); toast('تم إلغاء الإعفاء — الكنيسة محتاجة تفعيل اشتراك دلوقتي');
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
 };
@@ -1083,6 +1105,7 @@ SuperAdmin.approveProof = async function(proofId, churchId){
     const activeUntil = new Date(base + days*86400000).toISOString();
     await updateDoc(doc(dbFire,'churches',churchId), {status:'active', activeUntil});
     await updateDoc(doc(dbFire,'paymentProofs',proofId), {status:'approved', reviewedAt: Date.now()});
+    await saLog('قبول دفع وتفعيل اشتراك', `${c.name||churchId} — ${days} يوم`);
     toast('تم القبول وتفعيل الاشتراك '+days+' يوم');
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
 };
@@ -1090,6 +1113,7 @@ SuperAdmin.rejectProof = async function(proofId){
   if(!confirm('تأكيد رفض إثبات الدفع ده؟')) return;
   try{
     await updateDoc(doc(dbFire,'paymentProofs',proofId), {status:'rejected', reviewedAt: Date.now()});
+    await saLog('رفض إثبات دفع', proofId);
     toast('تم الرفض');
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
 };
@@ -1397,6 +1421,91 @@ SuperAdmin.removeAdminLink = async function(id){
   catch(e){ console.error(e); toast('تعذر الحذف: '+e.message); }
 };
 
+/* ---- سجل نشاط المالك (آخر حركاته: قبول/رفض/تمديد/إعفاء... إلخ) ---- */
+SuperAdmin.renderActivity = function(el){
+  let rows = SA_ACTIVITY_LOG.slice();
+  if(SA_ACTIVITY_FILTERS.from) rows = rows.filter(l=> new Date(l.date).toISOString().slice(0,10) >= SA_ACTIVITY_FILTERS.from);
+  if(SA_ACTIVITY_FILTERS.to) rows = rows.filter(l=> new Date(l.date).toISOString().slice(0,10) <= SA_ACTIVITY_FILTERS.to);
+  el.innerHTML = `
+    <div class="card card-pad" style="margin-bottom:16px;">
+      <p class="muted" style="margin-bottom:10px;">سجل حركاتك كمالك للنظام (قبول/رفض طلبات، تمديد اشتراكات، إعفاءات، مراجعة مدفوعات...). يظهر افتراضيًا آخر 300 حركة.</p>
+      <div class="toolbar">
+        <div class="field" style="margin:0;"><label>من الفترة</label><input type="date" id="ac-f-from" value="${SA_ACTIVITY_FILTERS.from}"></div>
+        <div class="field" style="margin:0;"><label>الي الفترة</label><input type="date" id="ac-f-to" value="${SA_ACTIVITY_FILTERS.to}"></div>
+      </div>
+      <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:10px;">
+        <button class="btn btn-ghost btn-sm" onclick="SuperAdmin.resetActivityFilters()">إعادة تعيين</button>
+        <button class="btn btn-primary btn-sm" onclick="SuperAdmin.applyActivityFilters()">عرض السجل</button>
+      </div>
+    </div>
+    <div class="card">
+      ${rows.length ? `<table><thead><tr><th>التاريخ</th><th>الإجراء</th><th>التفاصيل</th></tr></thead>
+      <tbody>${rows.map(l=>`<tr><td>${new Date(l.date).toLocaleString('ar-EG')}</td><td><b>${esc(l.action)}</b></td><td class="muted">${esc(l.details)}</td></tr>`).join('')}</tbody></table>`
+      : `<p class="muted" style="padding:16px;">لا توجد حركات مسجّلة في هذه الفترة.</p>`}
+    </div>
+  `;
+};
+SuperAdmin.applyActivityFilters = function(){
+  SA_ACTIVITY_FILTERS = { from: document.getElementById('ac-f-from').value, to: document.getElementById('ac-f-to').value };
+  SuperAdmin.render();
+};
+SuperAdmin.resetActivityFilters = function(){ SA_ACTIVITY_FILTERS = {from:'', to:''}; SuperAdmin.render(); };
+
+/* ---- تقرير شامل: إحصائيات الكنايس وطلبات الدفع خلال فترة ---- */
+const CHURCH_STATUS_LABELS = {pending:'قيد المراجعة', trial:'تجربة مجانية', active:'نشطة', expired:'منتهية', rejected:'مرفوضة', exempt:'معفاة'};
+SuperAdmin.renderReport = function(el){
+  let churches = SA_CHURCHES.slice();
+  if(SA_REPORT_FILTERS.from) churches = churches.filter(c=> !c.createdAt || new Date(c.createdAt).toISOString().slice(0,10) >= SA_REPORT_FILTERS.from);
+  if(SA_REPORT_FILTERS.to) churches = churches.filter(c=> !c.createdAt || new Date(c.createdAt).toISOString().slice(0,10) <= SA_REPORT_FILTERS.to);
+  if(SA_REPORT_FILTERS.category) churches = churches.filter(c=> c.status===SA_REPORT_FILTERS.category);
+
+  const byStatus = {};
+  churches.forEach(c=>{ byStatus[c.status] = (byStatus[c.status]||0)+1; });
+  const proofsApproved = SA_PROOFS.filter(p=>p.status==='approved').length;
+  const proofsPending = SA_PROOFS.filter(p=>p.status==='pending').length;
+  const proofsRejected = SA_PROOFS.filter(p=>p.status==='rejected').length;
+
+  el.innerHTML = `
+    <div class="card card-pad" style="margin-bottom:16px;">
+      <p class="muted" style="margin-bottom:10px;">التقرير يفتح افتراضيًا على كل الكنايس المسجلة. اختر فترة أو فئة حالة معيّنة واضغط "توليد التقرير".</p>
+      <div class="toolbar">
+        <div class="field" style="margin:0;"><label>من تاريخ</label><input type="date" id="rp-f-from" value="${SA_REPORT_FILTERS.from}"></div>
+        <div class="field" style="margin:0;"><label>إلى تاريخ</label><input type="date" id="rp-f-to" value="${SA_REPORT_FILTERS.to}"></div>
+        <div class="field" style="margin:0;"><label>فئة الكنايس (الحالة)</label>
+          <select id="rp-f-category"><option value="">كل الفئات</option>${Object.entries(CHURCH_STATUS_LABELS).map(([k,v])=>`<option value="${k}" ${SA_REPORT_FILTERS.category===k?'selected':''}>${v}</option>`).join('')}</select>
+        </div>
+      </div>
+      <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:10px;">
+        <button class="btn btn-ghost btn-sm" onclick="SuperAdmin.resetReportFilters()">إعادة تعيين</button>
+        <button class="btn btn-primary btn-sm" onclick="SuperAdmin.applyReportFilters()">📊 توليد التقرير</button>
+      </div>
+    </div>
+
+    <div class="info-card-grid" style="margin-bottom:16px;">
+      <div class="stat-card"><div class="stat-num">${churches.length}</div><div>إجمالي عدد الكنايس</div></div>
+      <div class="stat-card"><div class="stat-num">${byStatus.active||0}</div><div>كنايس نشطة</div></div>
+      <div class="stat-card"><div class="stat-num">${byStatus.trial||0}</div><div>تحت التجربة</div></div>
+      <div class="stat-card bad"><div class="stat-num">${byStatus.expired||0}</div><div>اشتراك منتهي</div></div>
+      <div class="stat-card"><div class="stat-num">${proofsApproved}</div><div>طلبات دفع مقبولة</div></div>
+      <div class="stat-card bad"><div class="stat-num">${proofsPending}</div><div>طلبات دفع قيد المراجعة</div></div>
+    </div>
+
+    <div class="section-head"><h2>توزيع الكنايس حسب الحالة</h2></div>
+    <div class="card"><table><thead><tr><th>الحالة</th><th>عدد الكنايس</th></tr></thead>
+      <tbody>${Object.keys(byStatus).length ? Object.entries(byStatus).map(([k,v])=>`<tr><td>${CHURCH_STATUS_LABELS[k]||k}</td><td>${v}</td></tr>`).join('') : `<tr><td colspan="2" class="muted">لا توجد كنايس مطابقة لهذه الفلاتر</td></tr>`}</tbody>
+    </table></div>
+  `;
+};
+SuperAdmin.applyReportFilters = function(){
+  SA_REPORT_FILTERS = {
+    from: document.getElementById('rp-f-from').value,
+    to: document.getElementById('rp-f-to').value,
+    category: document.getElementById('rp-f-category').value,
+  };
+  SuperAdmin.render();
+};
+SuperAdmin.resetReportFilters = function(){ SA_REPORT_FILTERS = {from:'', to:'', category:''}; SuperAdmin.render(); };
+
 window.SuperAdmin = SuperAdmin;
 
 /* ---------------- Nav ---------------- */
@@ -1578,6 +1687,7 @@ function listPage(opts){
       <div class="toolbar no-print">
         ${filterHtml}
         <input placeholder="بحث..." id="lp-search" oninput="opts_search()" style="min-width:180px;">
+        ${filterHtml? `<button class="btn btn-ghost btn-sm" onclick="_lpReset()">إعادة تعيين</button>`:''}
         ${opts.addLabel? `<button class="btn btn-gold btn-sm" onclick="${opts.onAdd}">+ ${opts.addLabel}</button>`:''}
       </div>
     </div>
@@ -1585,6 +1695,12 @@ function listPage(opts){
   `;
   window._lpRender = () => renderListTable(opts);
   window.opts_search = () => renderListTable(opts);
+  window._lpReset = () => {
+    document.querySelectorAll('.section-head .toolbar select, .section-head .toolbar input').forEach(el=>{
+      if(el.tagName==='SELECT') el.selectedIndex = 0; else el.value = '';
+    });
+    renderListTable(opts);
+  };
   renderListTable(opts);
 }
 function renderListTable(opts){

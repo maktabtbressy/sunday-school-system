@@ -147,6 +147,11 @@ service cloud.firestore {
       );
       allow delete: if false;
     }
+    // ===== سجل نشاط المالك (تتبع إجراءاته: قبول/رفض/تمديد/إعفاء... إلخ) =====
+    match /superadminLog/{docId} {
+      allow read, write: if isSuperAdmin();
+    }
+
     // ===== إعدادات عامة للمنصة (زي رابط "تواصل معنا") — تظهر لأي زائر حتى قبل تسجيل الدخول =====
     match /platformConfig/{docId} {
       allow read: if true;
