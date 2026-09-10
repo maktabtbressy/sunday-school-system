@@ -405,6 +405,9 @@ App.submitJoin = async function(){
     const inv = inviteSnap.data();
     await setDoc(doc(dbFire,'users', cred.user.uid), {
       name: inv.name || email.split('@')[0], email, role: inv.role, churchId: inv.churchId,
+      ...(inv.permissions? {permissions: inv.permissions} : {}),
+      ...(inv.jobTitle? {jobTitle: inv.jobTitle} : {}),
+      ...(inv.phone? {phone: inv.phone} : {}),
     });
     await updateDoc(doc(dbFire,'invites', email), {used:true});
     await signOut(auth);
@@ -512,7 +515,7 @@ App.logout = async function(){
   await log('تسجيل خروج', CURRENT_USER?CURRENT_USER.name:'');
   await signOut(auth);
 };
-const ROLE_LABELS = {admin:'مدير النظام', servant:'خادم', staff:'مستخدم إداري', superadmin:'مالك النظام'};
+const ROLE_LABELS = {admin:'مدير النظام', servant:'خادم', staff:'مستخدم إداري', superadmin:'مالك النظام', subadmin:'أدمن فرعي'};
 
 onAuthStateChanged(auth, async (fbUser) => {
   console.log('[AUTH] onAuthStateChanged fired. fbUser =', fbUser ? fbUser.email : null, 'REGISTERING =', REGISTERING);
@@ -585,6 +588,18 @@ onAuthStateChanged(auth, async (fbUser) => {
       console.log('[AUTH] step 8: SuperAdmin.boot() called, logging audit entry');
       await log('تسجيل دخول (مالك النظام)', CURRENT_USER.name);
       console.log('[AUTH] DONE - superadmin flow complete');
+      return;
+    }
+
+    /* ----- أدمن فرعي: نفس لوحة المالك، لكن بصلاحيات محدودة ----- */
+    if(CURRENT_USER.role === 'subadmin'){
+      hideAllAuthScreens();
+      const saApp = document.getElementById('superadmin-app');
+      saApp.style.display='flex';
+      document.getElementById('sa-user-name').textContent = CURRENT_USER.name + ' (أدمن فرعي)';
+      SuperAdmin.boot();
+      SuperAdmin.applyPermissionGating();
+      await saLog('تسجيل دخول (أدمن فرعي)', CURRENT_USER.name);
       return;
     }
 
@@ -661,9 +676,21 @@ let SA_ACTIVITY_FILTERS = {from:'', to:''};
 let SA_REPORT_FILTERS = {from:'', to:'', category:''};
 let SA_PLANS = [];
 let SA_DISCOUNT_CODES = [];
+let SA_SUBADMINS = [];
+let SA_SUBADMIN_INVITES = [];
 let SA_PAGE = 'churches';
 let saUnsub = null, saMethodsUnsub = null, saProofsUnsub = null, saChatUnsub = null, saChatsUnreadUnsub = null, saTicketsUnsub = null, saTicketTypesUnsub = null;
 
+/* إخفاء عناصر القائمة اللي الأدمن الفرعي مالوش صلاحية عليها (مالك النظام بيشوف كل حاجة دايمًا) */
+SuperAdmin.applyPermissionGating = function(){
+  if(CURRENT_USER.role !== 'subadmin') return;
+  const perms = CURRENT_USER.permissions || {};
+  document.querySelectorAll('#sa-nav li').forEach(li=>{
+    if(li.hasAttribute('data-owner-only')){ li.style.display='none'; return; }
+    const perm = li.getAttribute('data-perm');
+    if(perm && !perms[perm]) li.style.display='none';
+  });
+};
 SuperAdmin.boot = function(){
   if(saUnsub) saUnsub();
   saUnsub = onSnapshot(collection(dbFire,'churches'), snap=>{
@@ -721,6 +748,7 @@ SuperAdmin.boot = function(){
   // إعدادات المنصة العامة (رابط تواصل معنا يظهر لأي زائر)
   onSnapshot(doc(dbFire,'platformConfig','public'), d=>{
     SA_PUBLIC_CONFIG = d.exists() ? d.data() : {};
+    if(SA_PUBLIC_CONFIG.theme) applyTheme(SA_PUBLIC_CONFIG.theme);
     if(SA_PAGE==='links') SuperAdmin.render();
   }, err=>console.error(err));
 
@@ -747,8 +775,20 @@ SuperAdmin.boot = function(){
     SA_DISCOUNT_CODES = snap.docs.map(d=>({id:d.id, ...d.data()}));
     if(SA_PAGE==='plans') SuperAdmin.render();
   }, err=>console.error(err));
+
+  // إدارة الأدمن الفرعي — للمالك الحقيقي بس (مش للأدمن الفرعي نفسه، عشان ميديش صلاحيات لنفسه)
+  if(CURRENT_USER.role==='superadmin'){
+    onSnapshot(query(collection(dbFire,'users'), where('role','==','subadmin')), snap=>{
+      SA_SUBADMINS = snap.docs.map(d=>({id:d.id, ...d.data()}));
+      if(SA_PAGE==='subadmins') SuperAdmin.render();
+    }, err=>console.error(err));
+    onSnapshot(query(collection(dbFire,'invites'), where('role','==','subadmin')), snap=>{
+      SA_SUBADMIN_INVITES = snap.docs.map(d=>({id:d.id, ...d.data()}));
+      if(SA_PAGE==='subadmins') SuperAdmin.render();
+    }, err=>console.error(err));
+  }
 };
-const SA_PAGE_TITLES = {churches:'الكنايس', requests:'طلبات جديدة', methods:'طرق الدفع', plans:'الخطط والعروض', payments:'مراجعة المدفوعات', chats:'الدردشات', tickets:'التذاكر', links:'روابط', activity:'سجل النشاط', report:'تقرير شامل'};
+const SA_PAGE_TITLES = {churches:'الكنايس', requests:'طلبات جديدة', methods:'طرق الدفع', plans:'الخطط والعروض', payments:'مراجعة المدفوعات', chats:'الدردشات', tickets:'التذاكر', links:'المظهر والروابط', activity:'سجل النشاط', report:'تقرير شامل', subadmins:'الأدمن الفرعي'};
 SuperAdmin.navigate = function(page){
   SA_PAGE = page;
   UI.closeSaSidebar();
@@ -786,6 +826,7 @@ SuperAdmin.render = function(){
   if(SA_PAGE==='tickets'){ el.className=''; SuperAdmin.renderTickets(el); return; }
   if(SA_PAGE==='links'){ el.className=''; SuperAdmin.renderLinks(el); return; }
   if(SA_PAGE==='activity'){ el.className=''; SuperAdmin.renderActivity(el); return; }
+  if(SA_PAGE==='subadmins'){ el.className=''; SuperAdmin.renderSubAdmins(el); return; }
   el.className = 'church-grid';
   if(SA_PAGE==='requests'){
     const pending = SA_CHURCHES.filter(c=>c.status==='pending');
@@ -1393,7 +1434,22 @@ SuperAdmin.saveTicketUpdate = async function(id){
 
 /* ---- الروابط: تواصل معنا العام (لأي زائر) + روابط إدارية سريعة (خاصة بالمالك) ---- */
 SuperAdmin.renderLinks = function(el){
+  const currentTheme = SA_PUBLIC_CONFIG.theme || 'classic';
   el.innerHTML = `
+    <div class="card card-pad" style="margin-bottom:16px;">
+      <b style="font-size:13px; display:block; margin-bottom:8px;">🎨 مظهر النظام (يظهر لكل الكنايس دفعة واحدة)</b>
+      <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(130px,1fr)); gap:10px;">
+        ${Object.entries(THEME_PRESETS).map(([k,t])=>`
+          <div onclick="SuperAdmin.saveTheme('${k}')" style="cursor:pointer; border:2px solid ${currentTheme===k?'var(--gold)':'var(--line)'}; border-radius:10px; padding:10px; text-align:center;">
+            <div style="display:flex; height:28px; border-radius:6px; overflow:hidden; margin-bottom:8px;">
+              <div style="flex:1; background:${t.navy};"></div><div style="flex:1; background:${t.gold};"></div>
+            </div>
+            <span style="font-size:12px;">${t.label}${currentTheme===k?' ✓':''}</span>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+
     <div class="card card-pad" style="margin-bottom:16px;">
       <b style="font-size:13px; display:block; margin-bottom:8px;">💬 رابط تواصل معنا (يظهر لأي زائر في صفحة الدخول، حتى قبل ما يسجّل)</b>
       <div style="display:flex; gap:8px;">
@@ -1426,8 +1482,11 @@ SuperAdmin.renderLinks = function(el){
     </div>
   `;
 };
-SuperAdmin.savePublicContact = async function(){
-  const val = document.getElementById('pc-contact-link').value.trim();
+SuperAdmin.saveTheme = async function(key){
+  try{ await setDoc(doc(dbFire,'platformConfig','public'), { theme: key }, {merge:true}); applyTheme(key); toast('تم تطبيق المظهر الجديد لكل الزوار'); }
+  catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
+};
+SuperAdmin.savePublicContact = async function(){  const val = document.getElementById('pc-contact-link').value.trim();
   try{ await setDoc(doc(dbFire,'platformConfig','public'), { contactLink: val }, {merge:true}); toast('تم الحفظ'); }
   catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
 };
@@ -1625,6 +1684,100 @@ SuperAdmin.toggleDiscountCode = async function(id, makeActive){
 SuperAdmin.removeDiscountCode = async function(id){
   if(!confirm('حذف الكود ده؟')) return;
   try{ await deleteDoc(doc(dbFire,'discountCodes',id)); }catch(e){ console.error(e); toast('تعذر الحذف: '+e.message); }
+};
+
+/* ---- إدارة الأدمن الفرعي: دعوة أدمن فرعي جديد بصلاحيات محددة ---- */
+const SUBADMIN_PERM_LABELS = {
+  churches: 'إدارة الكنايس (قبول/رفض/تمديد/إعفاء)',
+  payments: 'مراجعة وقبول/رفض المدفوعات',
+  support: 'الرد على الدردشات والتذاكر',
+  settings: 'إدارة طرق الدفع والخطط والروابط',
+};
+SuperAdmin.renderSubAdmins = function(el){
+  el.innerHTML = `
+    <div class="card card-pad" style="margin-bottom:16px;">
+      <b style="font-size:13px; display:block; margin-bottom:8px;">➕ إضافة أدمن فرعي جديد</b>
+      <div class="form-grid">
+        <div class="field"><label>الاسم بالكامل</label><input id="sub-name"></div>
+        <div class="field"><label>رقم الموبايل</label><input id="sub-phone"></div>
+        <div class="field"><label>البريد الإلكتروني (هيستخدمه للدخول)</label><input id="sub-email" type="email"></div>
+        <div class="field"><label>المسمى الوظيفي</label><input id="sub-title" placeholder="مثال: مشرف دعم"></div>
+      </div>
+      <div class="field" style="margin-top:6px;"><label>حدّد الصلاحيات المتاحة</label>
+        <div style="display:flex; flex-direction:column; gap:8px; margin-top:6px;">
+          ${Object.entries(SUBADMIN_PERM_LABELS).map(([k,v])=>`
+            <label style="display:flex; align-items:center; gap:8px; font-weight:400; font-size:13px;">
+              <input type="checkbox" id="sub-perm-${k}"> ${v}
+            </label>
+          `).join('')}
+        </div>
+      </div>
+      <button class="btn btn-primary btn-sm" style="margin-top:10px;" onclick="SuperAdmin.inviteSubAdmin()">📩 إرسال دعوة تفعيل</button>
+      <p class="muted" style="margin-top:6px;">هيوصله رابط دعوة يقدر بيه يحدّد كلمة المرور بنفسه ويفعّل حسابه.</p>
+    </div>
+
+    ${SA_SUBADMIN_INVITES.length ? `
+      <div class="section-head"><h2>دعوات لسه معلّقة</h2></div>
+      <div class="card" style="margin-bottom:16px;">
+        ${SA_SUBADMIN_INVITES.map(inv=>`
+          <div style="padding:12px 16px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; gap:10px;">
+            <div><b>${esc(inv.name||inv.id)}</b><div class="muted" style="font-size:11.5px;">${esc(inv.id)} · لسه محدّش فعّل الحساب</div></div>
+            <button class="btn btn-danger btn-sm" onclick="SuperAdmin.cancelSubAdminInvite('${inv.id}')">إلغاء الدعوة</button>
+          </div>
+        `).join('')}
+      </div>
+    ` : ''}
+
+    <div class="section-head"><h2>قائمة الأدمن الفرعي</h2></div>
+    <div class="card">
+      ${SA_SUBADMINS.length ? SA_SUBADMINS.map(s=>`
+        <div style="padding:12px 16px; border-bottom:1px solid var(--line);">
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
+            <div><b>${esc(s.name)}</b><div class="muted" style="font-size:11.5px;">${esc(s.email)} ${s.jobTitle?' · '+esc(s.jobTitle):''}</div></div>
+            <button class="btn btn-danger btn-sm" onclick="SuperAdmin.removeSubAdmin('${s.id}')">حذف الحساب</button>
+          </div>
+          <div style="display:flex; flex-wrap:wrap; gap:6px; margin-top:8px;">
+            ${Object.entries(SUBADMIN_PERM_LABELS).map(([k,v])=>`
+              <label class="pill ${s.permissions&&s.permissions[k]?'status-active':'status-pending'}" style="cursor:pointer; font-weight:400;">
+                <input type="checkbox" ${s.permissions&&s.permissions[k]?'checked':''} onchange="SuperAdmin.toggleSubAdminPerm('${s.id}','${k}',this.checked)" style="margin-left:4px;"> ${v}
+              </label>
+            `).join('')}
+          </div>
+        </div>
+      `).join('') : `<p class="muted" style="padding:16px;">لا يوجد أدمن فرعي مُفعّل بعد.</p>`}
+    </div>
+  `;
+};
+SuperAdmin.inviteSubAdmin = async function(){
+  const name = document.getElementById('sub-name').value.trim();
+  const phone = document.getElementById('sub-phone').value.trim();
+  const email = document.getElementById('sub-email').value.trim().toLowerCase();
+  const jobTitle = document.getElementById('sub-title').value.trim();
+  const permissions = {};
+  Object.keys(SUBADMIN_PERM_LABELS).forEach(k=>{ permissions[k] = document.getElementById('sub-perm-'+k).checked; });
+  if(!name || !email){ toast('أدخل الاسم والبريد الإلكتروني'); return; }
+  try{
+    await setDoc(doc(dbFire,'invites',email), { name, phone, jobTitle, role:'subadmin', churchId:null, permissions, createdAt: Date.now() });
+    await saLog('دعوة أدمن فرعي جديد', `${name} — ${email}`);
+    toast('تم إرسال الدعوة — هيقدر يدخل من "عندك دعوة؟ انضم هنا" في شاشة الدخول');
+    ['sub-name','sub-phone','sub-email','sub-title'].forEach(id=>document.getElementById(id).value='');
+    Object.keys(SUBADMIN_PERM_LABELS).forEach(k=>{ document.getElementById('sub-perm-'+k).checked=false; });
+  }catch(e){ console.error(e); toast('تعذر إرسال الدعوة: '+e.message); }
+};
+SuperAdmin.cancelSubAdminInvite = async function(email){
+  if(!confirm('إلغاء الدعوة دي؟')) return;
+  try{ await deleteDoc(doc(dbFire,'invites',email)); }catch(e){ console.error(e); toast('تعذر الإلغاء: '+e.message); }
+};
+SuperAdmin.toggleSubAdminPerm = async function(uid, perm, val){
+  const s = SA_SUBADMINS.find(x=>x.id===uid);
+  const permissions = {...(s?.permissions||{}), [perm]: val};
+  try{ await updateDoc(doc(dbFire,'users',uid), {permissions}); }
+  catch(e){ console.error(e); toast('تعذر التحديث: '+e.message); }
+};
+SuperAdmin.removeSubAdmin = async function(uid){
+  if(!confirm('حذف حساب الأدمن الفرعي ده؟ لن يقدر يدخل النظام تاني.')) return;
+  try{ await deleteDoc(doc(dbFire,'users',uid)); await saLog('حذف أدمن فرعي', uid); toast('تم الحذف'); }
+  catch(e){ console.error(e); toast('تعذر الحذف: '+e.message); }
 };
 
 window.SuperAdmin = SuperAdmin;
@@ -3141,12 +3294,30 @@ App.globalSearch = function(q){
   box.style.display = 'block';
 };
 
+/* قوالب ألوان جاهزة لمظهر النظام (تُطبّق على كل الزوار دفعة واحدة) */
+const THEME_PRESETS = {
+  classic: {label:'كلاسيكي (ورقي/نحاسي)', navy:'#2F5D50', gold:'#B08D57'},
+  royal:   {label:'أزرق ملكي', navy:'#1F3A5F', gold:'#C9A227'},
+  wine:    {label:'نبيتي كنسي', navy:'#6B1E2B', gold:'#B08D57'},
+  violet:  {label:'بنفسجي أنيق', navy:'#4B3868', gold:'#B79A5B'},
+  olive:   {label:'أخضر زيتوني', navy:'#33422A', gold:'#A98B4E'},
+  slate:   {label:'رمادي أنثراسايت', navy:'#33383D', gold:'#B08D57'},
+};
+function applyTheme(key){
+  const t = THEME_PRESETS[key];
+  if(!t) return;
+  document.documentElement.style.setProperty('--navy', t.navy);
+  document.documentElement.style.setProperty('--gold', t.gold);
+}
+
 /* ---------- Boot ---------- */
 document.getElementById('login-pass').addEventListener('keydown', e=>{ if(e.key==='Enter') App.login(); });
 document.getElementById('login-user').addEventListener('keydown', e=>{ if(e.key==='Enter') document.getElementById('login-pass').focus(); });
 // رابط "تواصل معنا" العام في شاشة الدخول — بيتحمّل حتى قبل تسجيل الدخول
 getDoc(doc(dbFire,'platformConfig','public')).then(d=>{
-  const link = d.exists() ? (d.data().contactLink||'') : '';
+  const cfg = d.exists() ? d.data() : {};
+  if(cfg.theme) applyTheme(cfg.theme);
+  const link = cfg.contactLink||'';
   const el = document.getElementById('public-contact-link');
   if(el && link){ el.style.display='block'; el.innerHTML = `<a href="${esc(link)}" target="_blank" rel="noopener">💬 تواصل معنا</a>`; }
 }).catch(()=>{});

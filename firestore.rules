@@ -8,6 +8,9 @@ service cloud.firestore {
     function myRole() { return userDocExists() ? myDoc().data.role : null; }
     function myChurch() { return userDocExists() ? myDoc().data.churchId : null; }
     function isSuperAdmin() { return isSignedIn() && myRole() == 'superadmin'; }
+    function isSubAdmin() { return isSignedIn() && myRole() == 'subadmin'; }
+    function subAdminCan(perm) { return isSubAdmin() && myDoc().data.permissions != null && myDoc().data.permissions[perm] == true; }
+    function isPlatformStaff() { return isSuperAdmin() || isSubAdmin(); }
     function isChurchAdmin() { return isSignedIn() && myRole() == 'admin'; }
     function belongsToChurch(chId) { return isSignedIn() && myChurch() == chId; }
 
@@ -16,8 +19,9 @@ service cloud.firestore {
       allow read: if isSignedIn();
       // إنشاء كنيسة جديدة بيحصل وقت التسجيل الذاتي لمسؤول كنيسة جديدة
       allow create: if isSignedIn();
-      // تعديل حالة الاشتراك/التفعيل مسموح للمالك بس (حماية من إن حد يفعّل نفسه بنفسه)
-      allow update, delete: if isSuperAdmin();
+      // تعديل حالة الاشتراك/التفعيل مسموح للمالك، أو للأدمن الفرعي اللي عنده صلاحية "churches"
+      allow update: if isSuperAdmin() || subAdminCan('churches');
+      allow delete: if isSuperAdmin();
     }
 
     // ===== المستخدمون وأدوارهم =====
@@ -108,21 +112,21 @@ service cloud.firestore {
     match /paymentProofs/{docId} {
       allow read: if isSignedIn() && (isSuperAdmin() || belongsToChurch(resource.data.churchId));
       allow create: if isSignedIn() && (isSuperAdmin() || request.resource.data.churchId == myChurch());
-      allow update, delete: if isSuperAdmin();
+      allow update, delete: if isSuperAdmin() || subAdminCan('payments');
     }
 
     // ===== الدردشة بين كل كنيسة والمالك =====
     match /chatMessages/{docId} {
       allow read: if isSignedIn() && (isSuperAdmin() || belongsToChurch(resource.data.churchId));
-      allow create: if isSignedIn() && (isSuperAdmin() || request.resource.data.churchId == myChurch());
+      allow create: if isSignedIn() && (isSuperAdmin() || subAdminCan('support') || request.resource.data.churchId == myChurch());
       // تحديث محصور فقط في وسم "تمت القراءة" — كل طرف يقدر يعلّم رسائل الطرف التاني بس كمقروءة،
       // ومحتوى الرسالة نفسه يفضل ثابت زي ما اتبعت (immutable).
       allow update: if isSignedIn() && (
-        (isSuperAdmin() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['readBySA'])) ||
+        ((isSuperAdmin() || subAdminCan('support')) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['readBySA'])) ||
         (belongsToChurch(resource.data.churchId) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['readByChurch']))
       );
       allow delete: if isSignedIn() && (
-        isSuperAdmin() ||
+        isSuperAdmin() || subAdminCan('support') ||
         (belongsToChurch(resource.data.churchId) && resource.data.senderRole != 'superadmin')
       );
     }
@@ -139,7 +143,7 @@ service cloud.firestore {
       // المالك يقدر يعدّل أي حاجة (الرد + الحالة). الكنيسة تقدر بس تلغي تذكرتها وهي لسه مفتوحة،
       // ومش تقدر تغيّر أي حقل تاني غير حالة الإلغاء نفسها.
       allow update: if isSignedIn() && (
-        isSuperAdmin() ||
+        isSuperAdmin() || subAdminCan('support') ||
         (belongsToChurch(resource.data.churchId) &&
          resource.data.status == 'مفتوحة' &&
          request.resource.data.status == 'ملغاة' &&
@@ -161,7 +165,8 @@ service cloud.firestore {
 
     // ===== سجل نشاط المالك (تتبع إجراءاته: قبول/رفض/تمديد/إعفاء... إلخ) =====
     match /superadminLog/{docId} {
-      allow read, write: if isSuperAdmin();
+      allow read: if isSuperAdmin();
+      allow write: if isSuperAdmin() || isSubAdmin();
     }
 
     // ===== إعدادات عامة للمنصة (زي رابط "تواصل معنا") — تظهر لأي زائر حتى قبل تسجيل الدخول =====
