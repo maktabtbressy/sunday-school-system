@@ -5,7 +5,8 @@
 
 let DB = {settings:{schoolName:'مدرسة الأحد'}, stages:[], grades:[], classes:[], members:[], servants:[],
   attendance:[], evaluations:[], followups:[], activities:[], auditLog:[], users:[],
-  paymentMethods:[], paymentProofs:[], chatMessages:[]}; // ذاكرة مؤقتة تُزامَن تلقائيًا مع Firestore
+  paymentMethods:[], paymentProofs:[], chatMessages:[], tickets:[]}; // ذاكرة مؤقتة تُزامَن تلقائيًا مع Firestore
+let TICKET_TYPES = []; // أنواع التذاكر المتاحة (يديرها المالك)
 let CURRENT_USER = null;     // logged-in user object (session only, not persisted)
 let CURRENT_PAGE = 'dashboard';
 let CURRENT_PARAM = undefined;
@@ -128,6 +129,22 @@ function attachListeners(onReady){
     if(CURRENT_PAGE==='chat'){ Chat.renderMessages(); markChatRead(unread, 'readByChurch'); }
   }, err=>console.error(err));
   unsubscribers.push(unsubChat);
+
+  // أنواع التذاكر المتاحة (يديرها المالك، بيانات عامة)
+  const unsubTTypes = onSnapshot(doc(dbFire,'ticketTypes','main'), d=>{
+    TICKET_TYPES = d.exists() ? (d.data().types||[]) : [];
+    if(CURRENT_PAGE==='tickets') Tickets.render();
+  }, err=>console.error(err));
+  unsubscribers.push(unsubTTypes);
+
+  // تذاكر الدعم الفني/الشكاوى الخاصة بالكنيسة
+  const unsubTickets = onSnapshot(query(collection(dbFire,'tickets'), where('churchId','==',CURRENT_CHURCH_ID)), snap=>{
+    DB.tickets = snap.docs.map(d=>({id:d.id, ...d.data()})).sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
+    const unread = DB.tickets.filter(t=> t.readByChurch===false);
+    App.updateNavBadge('tickets', unread.length);
+    if(CURRENT_PAGE==='tickets'){ Tickets.render(); markChatRead(unread, 'readByChurch', 'tickets'); }
+  }, err=>console.error(err));
+  unsubscribers.push(unsubTickets);
 }
 
 function renderCurrent(){
@@ -144,13 +161,13 @@ async function fsAdd(col, data){
 }
 /* fsAddRaw بيضيف من غير أي إضافة تلقائية - يُستخدم وقت التسجيل/الإعداد الأولي قبل ما نكون "داخلين" بحساب مفعّل */
 async function fsAddRaw(col, data){ const ref = await addDoc(collection(dbFire,col), data); return ref.id; }
-/* تعليم رسائل شات كمقروءة دفعة واحدة (يُستخدم من الطرفين: الكنيسة ولوحة المالك) */
-async function markChatRead(messages, field){
-  const unread = (messages||[]).filter(m=> m[field]===false);
+/* تعليم مستندات (رسائل شات أو تذاكر) كمقروءة دفعة واحدة عن طريق تحديث حقل واحد بس */
+async function markChatRead(items, field, col='chatMessages'){
+  const unread = (items||[]).filter(m=> m[field]===false);
   if(!unread.length) return;
   try{
     const batch = writeBatch(dbFire);
-    unread.forEach(m=> batch.update(doc(dbFire,'chatMessages',m.id), {[field]:true}));
+    unread.forEach(m=> batch.update(doc(dbFire,col,m.id), {[field]:true}));
     await batch.commit();
   }catch(e){ console.error(e); }
 }
@@ -508,8 +525,10 @@ let SA_PROOFS = [];
 let SA_CHAT_CHURCH_ID = null;
 let SA_CHAT_MESSAGES = [];
 let SA_UNREAD_BY_CHURCH = {}; // churchId -> عدد رسائل الكنيسة اللي لسه المالك مقراهاش
+let SA_TICKETS = [];
+let SA_TICKET_FILTERS = {type:'', status:'', search:''};
 let SA_PAGE = 'churches';
-let saUnsub = null, saMethodsUnsub = null, saProofsUnsub = null, saChatUnsub = null, saChatsUnreadUnsub = null;
+let saUnsub = null, saMethodsUnsub = null, saProofsUnsub = null, saChatUnsub = null, saChatsUnreadUnsub = null, saTicketsUnsub = null, saTicketTypesUnsub = null;
 
 SuperAdmin.boot = function(){
   if(saUnsub) saUnsub();
@@ -547,9 +566,26 @@ SuperAdmin.boot = function(){
     if(badge){ badge.textContent = msgs.length; badge.style.display = msgs.length ? 'inline-block' : 'none'; }
     if(SA_PAGE==='chats' && !SA_CHAT_CHURCH_ID) SuperAdmin.render();
   }, err=>console.error(err));
+
+  // أنواع التذاكر المتاحة (يديرها المالك)
+  if(saTicketTypesUnsub) saTicketTypesUnsub();
+  saTicketTypesUnsub = onSnapshot(doc(dbFire,'ticketTypes','main'), d=>{
+    TICKET_TYPES = d.exists() ? (d.data().types||[]) : [];
+    if(SA_PAGE==='tickets') SuperAdmin.render();
+  }, err=>console.error(err));
+
+  // كل التذاكر عبر كل الكنايس
+  if(saTicketsUnsub) saTicketsUnsub();
+  saTicketsUnsub = onSnapshot(collection(dbFire,'tickets'), snap=>{
+    SA_TICKETS = snap.docs.map(d=>({id:d.id, ...d.data()})).sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
+    const unreadCount = SA_TICKETS.filter(t=>t.readBySA===false).length;
+    const badge = document.getElementById('sa-tickets-badge');
+    if(badge){ badge.textContent = unreadCount; badge.style.display = unreadCount ? 'inline-block' : 'none'; }
+    if(SA_PAGE==='tickets') SuperAdmin.render();
+  }, err=>console.error(err));
 };
 
-const SA_PAGE_TITLES = {churches:'الكنايس', requests:'طلبات جديدة', methods:'طرق الدفع', payments:'مراجعة المدفوعات', chats:'الدردشات'};
+const SA_PAGE_TITLES = {churches:'الكنايس', requests:'طلبات جديدة', methods:'طرق الدفع', payments:'مراجعة المدفوعات', chats:'الدردشات', tickets:'التذاكر'};
 SuperAdmin.navigate = function(page){
   SA_PAGE = page;
   UI.closeSaSidebar();
@@ -582,6 +618,7 @@ SuperAdmin.render = function(){
   if(SA_PAGE==='methods'){ el.className=''; SuperAdmin.renderMethods(el); return; }
   if(SA_PAGE==='payments'){ el.className=''; SuperAdmin.renderPayments(el); return; }
   if(SA_PAGE==='chats'){ el.className=''; SuperAdmin.renderChats(el); return; }
+  if(SA_PAGE==='tickets'){ el.className=''; SuperAdmin.renderTickets(el); return; }
   el.className = 'church-grid';
   if(SA_PAGE==='requests'){
     const pending = SA_CHURCHES.filter(c=>c.status==='pending');
@@ -995,6 +1032,102 @@ SuperAdmin.sendChat = async function(){
   }catch(e){ console.error(e); toast('تعذر إرسال الرسالة: '+e.message); }
 };
 
+/* ---- التذاكر (الدعم الفني/الشكاوى) عبر كل الكنايس ---- */
+SuperAdmin.renderTickets = function(el){
+  const types = TICKET_TYPES;
+  let filtered = SA_TICKETS.slice();
+  if(SA_TICKET_FILTERS.type) filtered = filtered.filter(t=>t.type===SA_TICKET_FILTERS.type);
+  if(SA_TICKET_FILTERS.status) filtered = filtered.filter(t=>t.status===SA_TICKET_FILTERS.status);
+  if(SA_TICKET_FILTERS.search) filtered = filtered.filter(t=> (t.ticketNo||'').toLowerCase().includes(SA_TICKET_FILTERS.search.toLowerCase()));
+
+  el.innerHTML = `
+    <div class="card card-pad" style="margin-bottom:16px;">
+      <b style="font-size:13px; display:block; margin-bottom:8px;">أنواع التذاكر</b>
+      <div style="display:flex; gap:8px; margin-bottom:10px;">
+        <input id="new-ticket-type" placeholder="اكتب نوع جديد..." style="flex:1; padding:8px 10px; border:1px solid var(--line); border-radius:8px;">
+        <button class="btn btn-primary btn-sm" onclick="SuperAdmin.addTicketType()">+ إضافة</button>
+      </div>
+      <div style="display:flex; flex-wrap:wrap; gap:6px;">
+        ${types.length ? types.map(t=>`<span class="pill status-pending" style="display:inline-flex; align-items:center; gap:6px;">${esc(t)} <a style="cursor:pointer; color:var(--absent); font-weight:900;" onclick="SuperAdmin.removeTicketType('${esc(t).replace(/'/g,"\\'")}')">✖</a></span>`).join('') : `<span class="muted">لا توجد أنواع مضافة بعد — أضف أول نوع فوق.</span>`}
+      </div>
+    </div>
+
+    <div class="card card-pad" style="margin-bottom:16px; display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end;">
+      <div class="field" style="margin:0; min-width:140px;"><label>النوع</label>
+        <select onchange="SuperAdmin.setTicketFilter('type', this.value)">
+          <option value="">الكل</option>
+          ${types.map(t=>`<option value="${esc(t)}" ${SA_TICKET_FILTERS.type===t?'selected':''}>${esc(t)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field" style="margin:0; min-width:140px;"><label>الحالة</label>
+        <select onchange="SuperAdmin.setTicketFilter('status', this.value)">
+          <option value="">الكل</option>
+          ${Object.keys(TICKET_STATUS_CLASS).map(s=>`<option value="${s}" ${SA_TICKET_FILTERS.status===s?'selected':''}>${s}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field" style="margin:0; flex:1; min-width:160px;"><label>بحث برقم التذكرة</label>
+        <input value="${esc(SA_TICKET_FILTERS.search)}" placeholder="مثال: TKT-558163" oninput="SuperAdmin.setTicketFilter('search', this.value)">
+      </div>
+    </div>
+
+    <div class="card" style="padding:0;">
+      ${filtered.length ? filtered.map(t=>{
+        const church = SA_CHURCHES.find(c=>c.id===t.churchId);
+        return `<div style="padding:12px 16px; border-bottom:1px solid var(--line); cursor:pointer; display:flex; justify-content:space-between; align-items:center; gap:10px; ${t.readBySA===false?'background:#FBF6EC;':''}" onclick="SuperAdmin.openTicketDetail('${t.id}')">
+          <div>
+            <b style="font-size:13px;">${esc(t.ticketNo)} — ${esc(t.title)}</b>
+            <div class="muted" style="font-size:11.5px; margin-top:2px;">${esc(church?church.name:'')} · ${esc(t.type||'')} · ${new Date(t.createdAt).toLocaleDateString('ar-EG')}</div>
+          </div>
+          ${ticketStatusPill(t.status)}
+        </div>`;
+      }).join('') : `<p class="muted" style="padding:16px;">لا توجد تذاكر مطابقة لهذا الفلتر.</p>`}
+    </div>
+  `;
+};
+SuperAdmin.addTicketType = async function(){
+  const input = document.getElementById('new-ticket-type');
+  const val = input.value.trim();
+  if(!val) return;
+  if(TICKET_TYPES.includes(val)){ toast('النوع ده موجود بالفعل'); return; }
+  try{ await setDoc(doc(dbFire,'ticketTypes','main'), { types:[...TICKET_TYPES, val] }, {merge:true}); input.value=''; }
+  catch(e){ console.error(e); toast('تعذر الإضافة: '+e.message); }
+};
+SuperAdmin.removeTicketType = async function(name){
+  if(!confirm('حذف نوع التذكرة ده؟ (مش هيأثر على التذاكر القديمة اللي مستخدماه بالفعل)')) return;
+  try{ await setDoc(doc(dbFire,'ticketTypes','main'), { types: TICKET_TYPES.filter(t=>t!==name) }, {merge:true}); }
+  catch(e){ console.error(e); toast('تعذر الحذف: '+e.message); }
+};
+SuperAdmin.setTicketFilter = function(key, val){ SA_TICKET_FILTERS[key]=val; SuperAdmin.render(); };
+SuperAdmin.openTicketDetail = function(id){
+  const t = SA_TICKETS.find(x=>x.id===id);
+  if(!t) return;
+  const church = SA_CHURCHES.find(c=>c.id===t.churchId);
+  UI.openModal(t.ticketNo, `
+    ${ticketStatusPill(t.status)}
+    <h3 style="margin:10px 0 4px; font-size:15px;">${esc(t.title)}</h3>
+    <p class="muted" style="font-size:11.5px; margin-bottom:10px;">${esc(church?church.name:'')} · ${esc(t.createdByName||'')} · ${esc(t.type||'')} · ${new Date(t.createdAt).toLocaleString('ar-EG')}</p>
+    <p style="white-space:pre-wrap; font-size:13.5px;">${esc(t.description)}</p>
+    ${t.attachmentImg? `<img src="${t.attachmentImg}" style="max-width:160px; border-radius:8px; margin-top:10px; cursor:pointer; border:1px solid var(--line);" onclick="UI.previewImage('${t.attachmentImg.replace(/'/g,"\\'")}')">`:''}
+    <div class="field" style="margin-top:16px; border-top:1px solid var(--line); padding-top:14px;">
+      <label>الحالة</label>
+      <select id="tk-status-update">
+        ${Object.keys(TICKET_STATUS_CLASS).map(s=>`<option value="${s}" ${t.status===s?'selected':''}>${s}</option>`).join('')}
+      </select>
+    </div>
+    <div class="field"><label>الرد على الكنيسة</label><textarea id="tk-reply" rows="3" placeholder="اكتب ردك هنا...">${esc(t.adminReply||'')}</textarea></div>
+  `, `<button class="btn btn-primary" onclick="SuperAdmin.saveTicketUpdate('${t.id}')">💾 حفظ وإرسال للكنيسة</button><button class="btn btn-ghost" onclick="UI.closeModal()">إغلاق</button>`);
+  if(t.readBySA===false) markChatRead([t], 'readBySA', 'tickets');
+};
+SuperAdmin.saveTicketUpdate = async function(id){
+  const status = document.getElementById('tk-status-update').value;
+  const reply = document.getElementById('tk-reply').value.trim();
+  try{
+    await updateDoc(doc(dbFire,'tickets',id), { status, adminReply:reply, hasAdminUpdate:true, updatedAt: Date.now(), readByChurch:false });
+    UI.closeModal();
+    toast('تم الحفظ وإرسال الرد للكنيسة');
+  }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
+};
+
 window.SuperAdmin = SuperAdmin;
 
 /* ---------------- Nav ---------------- */
@@ -1010,6 +1143,7 @@ const NAV_ITEMS = [
   {id:'reports', label:'التقارير', ic:'▥'},
   {id:'billing', label:'الاشتراك والدفع', ic:'💳'},
   {id:'chat', label:'الدردشة مع الإدارة', ic:'💬', adminOnly:true, badge:true},
+  {id:'tickets', label:'الدعم الفني والشكاوى', ic:'🎫', badge:true},
   {id:'users', label:'المستخدمون والصلاحيات', ic:'⚿', adminOnly:true},
   {id:'settings', label:'الإعدادات', ic:'⚙', adminOnly:true},
   {id:'backup', label:'النسخ الاحتياطي', ic:'⟲', adminOnly:true},
@@ -1039,7 +1173,7 @@ App.navigate = function(page, param){
     stages: Views.stages, attendance: Views.attendance, evaluations: Views.evaluations,
     followups: Views.followups, activities: Views.activities, reports: Views.reports,
     users: Views.users, settings: Views.settings, backup: Views.backup,
-    memberProfile: Views.memberProfile, billing: Views.billing, chat: Views.chat,
+    memberProfile: Views.memberProfile, billing: Views.billing, chat: Views.chat, tickets: Views.tickets,
   };
   (map[page]||Views.dashboard)(param);
 };
@@ -2271,6 +2405,86 @@ Chat.send = async function(){
   }catch(e){ console.error(e); toast('تعذر إرسال الرسالة: '+e.message); }
 };
 window.Chat = Chat;
+
+/* ---------- الدعم الفني والشكاوى (نظام التذاكر) ---------- */
+const Tickets = {};
+const TICKET_STATUS_CLASS = {'مفتوحة':'status-pending', 'قيد المعالجة':'status-trial', 'مغلقة':'status-active', 'ملغاة':'status-expired'};
+function ticketStatusPill(status){ return `<span class="pill ${TICKET_STATUS_CLASS[status]||'status-pending'}">${esc(status||'مفتوحة')}</span>`; }
+Views.tickets = function(){ Tickets.render(); };
+Tickets.render = function(){
+  const list = DB.tickets||[];
+  $content().innerHTML = `
+    <div class="section-head"><h2>الدعم الفني والشكاوى</h2>
+      <button class="btn btn-primary btn-sm" onclick="Tickets.openNewForm()">+ تذكرة جديدة</button>
+    </div>
+    ${list.length ? `<div class="card" style="padding:0;">
+      ${list.map(t=>`<div style="padding:12px 16px; border-bottom:1px solid var(--line); cursor:pointer; display:flex; justify-content:space-between; align-items:center; gap:10px;" onclick="Tickets.openDetail('${t.id}')">
+        <div>
+          <b style="font-size:13px;">${esc(t.ticketNo)} — ${esc(t.title)}</b>
+          <div class="muted" style="font-size:11.5px; margin-top:2px;">${esc(t.type||'')} · ${new Date(t.createdAt).toLocaleDateString('ar-EG')}${t.hasAdminUpdate?' · 🆕 فيه رد من الإدارة':''}</div>
+        </div>
+        ${ticketStatusPill(t.status)}
+      </div>`).join('')}
+    </div>` : `<p class="muted">لا توجد تذاكر بعد. لو عندك مشكلة أو شكوى، ابدأ تذكرة جديدة من الزرار اللي فوق.</p>`}
+  `;
+};
+Tickets.openNewForm = function(){
+  UI.openModal('تذكرة جديدة', `
+    <div class="field"><label>نوع التذكرة</label>
+      <select id="tk-type">${TICKET_TYPES.length ? TICKET_TYPES.map(t=>`<option value="${esc(t)}">${esc(t)}</option>`).join('') : `<option value="عام">عام</option>`}</select>
+    </div>
+    <div class="field"><label>العنوان</label><input id="tk-title" placeholder="عنوان مختصر للمشكلة/الطلب"></div>
+    <div class="field"><label>التفاصيل</label><textarea id="tk-desc" rows="4" placeholder="اشرح المشكلة أو الطلب بالتفصيل..."></textarea></div>
+    <div class="field"><label>مرفق (اختياري)</label><input type="file" id="tk-file" accept="image/*"></div>
+    <p class="login-error" id="tk-error" style="display:block;"></p>
+  `, `<button class="btn btn-primary" onclick="Tickets.submit()">إرسال التذكرة</button><button class="btn btn-ghost" onclick="UI.closeModal()">إلغاء</button>`);
+};
+Tickets.submit = async function(){
+  const type = document.getElementById('tk-type').value;
+  const title = document.getElementById('tk-title').value.trim();
+  const desc = document.getElementById('tk-desc').value.trim();
+  const file = document.getElementById('tk-file').files[0];
+  const errEl = document.getElementById('tk-error');
+  errEl.textContent='';
+  if(!title || !desc){ errEl.textContent='من فضلك اكتب العنوان والتفاصيل'; return; }
+  try{
+    const ticketNo = 'TKT-'+String(Date.now()).slice(-6);
+    const payload = {
+      ticketNo, churchId: CURRENT_CHURCH_ID, churchName: (DB.settings && DB.settings.churchName) || '',
+      createdByName: CURRENT_USER.name, createdByRole: IMPERSONATING?'admin':CURRENT_USER.role,
+      type, title, description: desc, status:'مفتوحة', adminReply:'', hasAdminUpdate:false, cancelledByChurch:false,
+      createdAt: Date.now(), updatedAt: Date.now(), readBySA:false, readByChurch:true,
+    };
+    if(file) payload.attachmentImg = await compressImage(file, 900, 0.6);
+    await fsAddRaw('tickets', payload);
+    UI.closeModal();
+    toast('تم إرسال التذكرة برقم '+ticketNo);
+  }catch(e){ console.error(e); errEl.textContent = 'تعذر إرسال التذكرة: '+e.message; }
+};
+Tickets.openDetail = function(id){
+  const t = (DB.tickets||[]).find(x=>x.id===id);
+  if(!t) return;
+  UI.openModal(t.ticketNo, `
+    ${ticketStatusPill(t.status)}
+    <h3 style="margin:10px 0 4px; font-size:15px;">${esc(t.title)}</h3>
+    <p class="muted" style="font-size:11.5px; margin-bottom:10px;">${esc(t.type||'')} · ${new Date(t.createdAt).toLocaleString('ar-EG')}</p>
+    <p style="white-space:pre-wrap; font-size:13.5px;">${esc(t.description)}</p>
+    ${t.attachmentImg? `<img src="${t.attachmentImg}" style="max-width:160px; border-radius:8px; margin-top:10px; cursor:pointer; border:1px solid var(--line);" onclick="UI.previewImage('${t.attachmentImg.replace(/'/g,"\\'")}')">`:''}
+    ${t.hasAdminUpdate? `<div class="card card-pad" style="margin-top:14px; background:var(--paper);">
+      <b style="font-size:12.5px; color:var(--navy);">رد الإدارة:</b>
+      <p style="font-size:13px; margin-top:6px; white-space:pre-wrap;">${esc(t.adminReply||'')}</p>
+    </div>` : ''}
+  `, t.status==='مفتوحة' ? `<button class="btn btn-danger btn-block" onclick="Tickets.cancel('${t.id}')">🚫 إلغاء التذكرة</button>` : '');
+};
+Tickets.cancel = async function(id){
+  if(!confirm('هل تريد إلغاء هذه التذكرة؟')) return;
+  try{
+    await updateDoc(doc(dbFire,'tickets',id), { status:'ملغاة', cancelledByChurch:true });
+    UI.closeModal();
+    toast('تم إلغاء التذكرة');
+  }catch(e){ console.error(e); toast('تعذر الإلغاء: '+e.message); }
+};
+window.Tickets = Tickets;
 
 /* ---------- Global search ---------- */
 App.globalSearch = function(q){
