@@ -147,6 +147,18 @@ service cloud.firestore {
       );
       allow delete: if false;
     }
+    // ===== خطط الاشتراك (معلوماتية، يديرها المالك) =====
+    match /subscriptionPlans/{docId} {
+      allow read: if isSignedIn();
+      allow write: if isSuperAdmin();
+    }
+
+    // ===== أكواد خصم/أيام إضافية على الاشتراك — المالك بس يقدر يقرأها أو يعدّلها
+    // (الكنيسة بتكتب الكود كنص عادي مع طلب الدفع، مش بتقرأ قائمة الأكواد) =====
+    match /discountCodes/{docId} {
+      allow read, write: if isSuperAdmin();
+    }
+
     // ===== سجل نشاط المالك (تتبع إجراءاته: قبول/رفض/تمديد/إعفاء... إلخ) =====
     match /superadminLog/{docId} {
       allow read, write: if isSuperAdmin();

@@ -5,7 +5,7 @@
 
 let DB = {settings:{schoolName:'مدرسة الأحد'}, stages:[], grades:[], classes:[], members:[], servants:[],
   attendance:[], evaluations:[], followups:[], activities:[], auditLog:[], users:[],
-  paymentMethods:[], paymentProofs:[], chatMessages:[], tickets:[]}; // ذاكرة مؤقتة تُزامَن تلقائيًا مع Firestore
+  paymentMethods:[], paymentProofs:[], chatMessages:[], tickets:[], plans:[]}; // ذاكرة مؤقتة تُزامَن تلقائيًا مع Firestore
 let TICKET_TYPES = []; // أنواع التذاكر المتاحة (يديرها المالك)
 let CURRENT_USER = null;     // logged-in user object (session only, not persisted)
 let CURRENT_PAGE = 'dashboard';
@@ -259,6 +259,13 @@ function attachListeners(onReady){
     if(CURRENT_PAGE==='tickets'){ Tickets.render(); markChatRead(unread, 'readByChurch', 'tickets'); }
   }, err=>console.error(err));
   unsubscribers.push(unsubTickets);
+
+  // خطط الاشتراك المعلنة (معلوماتية)
+  const unsubPlans = onSnapshot(collection(dbFire,'subscriptionPlans'), snap=>{
+    DB.plans = snap.docs.map(d=>({id:d.id, ...d.data()}));
+    if(CURRENT_PAGE==='billing') Views.billing();
+  }, err=>console.error(err));
+  unsubscribers.push(unsubPlans);
 }
 
 function renderCurrent(){
@@ -652,6 +659,8 @@ let SA_ADMIN_LINKS = [];
 let SA_ACTIVITY_LOG = [];
 let SA_ACTIVITY_FILTERS = {from:'', to:''};
 let SA_REPORT_FILTERS = {from:'', to:'', category:''};
+let SA_PLANS = [];
+let SA_DISCOUNT_CODES = [];
 let SA_PAGE = 'churches';
 let saUnsub = null, saMethodsUnsub = null, saProofsUnsub = null, saChatUnsub = null, saChatsUnreadUnsub = null, saTicketsUnsub = null, saTicketTypesUnsub = null;
 
@@ -726,8 +735,20 @@ SuperAdmin.boot = function(){
     SA_ACTIVITY_LOG = snap.docs.map(d=>({id:d.id, ...d.data()}));
     if(SA_PAGE==='activity') SuperAdmin.render();
   }, err=>console.error(err));
+
+  // خطط الاشتراك المعلنة
+  onSnapshot(collection(dbFire,'subscriptionPlans'), snap=>{
+    SA_PLANS = snap.docs.map(d=>({id:d.id, ...d.data()}));
+    if(SA_PAGE==='plans') SuperAdmin.render();
+  }, err=>console.error(err));
+
+  // أكواد الخصم/الأيام الإضافية
+  onSnapshot(collection(dbFire,'discountCodes'), snap=>{
+    SA_DISCOUNT_CODES = snap.docs.map(d=>({id:d.id, ...d.data()}));
+    if(SA_PAGE==='plans') SuperAdmin.render();
+  }, err=>console.error(err));
 };
-const SA_PAGE_TITLES = {churches:'الكنايس', requests:'طلبات جديدة', methods:'طرق الدفع', payments:'مراجعة المدفوعات', chats:'الدردشات', tickets:'التذاكر', links:'روابط', activity:'سجل النشاط', report:'تقرير شامل'};
+const SA_PAGE_TITLES = {churches:'الكنايس', requests:'طلبات جديدة', methods:'طرق الدفع', plans:'الخطط والعروض', payments:'مراجعة المدفوعات', chats:'الدردشات', tickets:'التذاكر', links:'روابط', activity:'سجل النشاط', report:'تقرير شامل'};
 SuperAdmin.navigate = function(page){
   SA_PAGE = page;
   UI.closeSaSidebar();
@@ -758,6 +779,7 @@ function churchStatusInfo(c){
 SuperAdmin.render = function(){
   const el = document.getElementById('sa-content');
   if(SA_PAGE==='methods'){ el.className=''; SuperAdmin.renderMethods(el); return; }
+  if(SA_PAGE==='plans'){ el.className=''; SuperAdmin.renderPlans(el); return; }
   if(SA_PAGE==='payments'){ el.className=''; SuperAdmin.renderPayments(el); return; }
   if(SA_PAGE==='report'){ el.className=''; SuperAdmin.renderReport(el); return; }
   if(SA_PAGE==='chats'){ el.className=''; SuperAdmin.renderChats(el); return; }
@@ -1082,6 +1104,7 @@ SuperAdmin.proofCard = function(p){
     <div class="kv" style="margin-bottom:8px;">
       <b>حوّل عن طريق</b><span>${esc(p.methodName||'—')}</span>
       <b>حوّل من</b><span style="font-weight:800; color:var(--navy);">${esc(p.senderAccount||'—')}</span>
+      ${p.discountCode? `<b>كود خصم مُدخل</b><span style="font-family:monospace;">${esc(p.discountCode)}</span>`:''}
     </div>
     ${p.note? `<p class="muted">${esc(p.note)}</p>`:''}
     <p class="muted" style="font-size:11.5px;">${p.createdAt? fmtDate(new Date(p.createdAt).toISOString()):''}</p>
@@ -1098,15 +1121,27 @@ SuperAdmin.proofCard = function(p){
 };
 SuperAdmin.approveProof = async function(proofId, churchId){
   const daysInput = document.getElementById('proof-days-'+proofId);
-  const days = Number(daysInput ? daysInput.value : 30) || 30;
+  let days = Number(daysInput ? daysInput.value : 30) || 30;
   try{
     const c = SA_CHURCHES.find(x=>x.id===churchId) || {};
+    const p = SA_PROOFS.find(x=>x.id===proofId) || {};
+    let appliedCode = null;
+    if(p.discountCode){
+      const codeDoc = SA_DISCOUNT_CODES.find(x=> x.code===p.discountCode && x.active!==false
+        && (!x.maxUses || (x.usedCount||0) < x.maxUses)
+        && (!x.expiresAt || x.expiresAt >= todayISO()));
+      if(codeDoc){
+        days += (codeDoc.bonusDays||0);
+        appliedCode = codeDoc;
+        await updateDoc(doc(dbFire,'discountCodes',codeDoc.id), {usedCount: (codeDoc.usedCount||0)+1});
+      }
+    }
     const base = (c.status==='active' && c.activeUntil && new Date(c.activeUntil).getTime()>Date.now()) ? new Date(c.activeUntil).getTime() : Date.now();
     const activeUntil = new Date(base + days*86400000).toISOString();
     await updateDoc(doc(dbFire,'churches',churchId), {status:'active', activeUntil});
     await updateDoc(doc(dbFire,'paymentProofs',proofId), {status:'approved', reviewedAt: Date.now()});
-    await saLog('قبول دفع وتفعيل اشتراك', `${c.name||churchId} — ${days} يوم`);
-    toast('تم القبول وتفعيل الاشتراك '+days+' يوم');
+    await saLog('قبول دفع وتفعيل اشتراك', `${c.name||churchId} — ${days} يوم${appliedCode?` (منهم ${appliedCode.bonusDays} من كود ${appliedCode.code})`:''}`);
+    toast(appliedCode ? `تم القبول وتفعيل الاشتراك ${days} يوم (منهم ${appliedCode.bonusDays} من كود الخصم)` : 'تم القبول وتفعيل الاشتراك '+days+' يوم');
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
 };
 SuperAdmin.rejectProof = async function(proofId){
@@ -1505,6 +1540,92 @@ SuperAdmin.applyReportFilters = function(){
   SuperAdmin.render();
 };
 SuperAdmin.resetReportFilters = function(){ SA_REPORT_FILTERS = {from:'', to:'', category:''}; SuperAdmin.render(); };
+
+/* ---- الخطط والعروض: خطط اشتراك معلنة + أكواد خصم/أيام إضافية ---- */
+SuperAdmin.renderPlans = function(el){
+  el.innerHTML = `
+    <div class="card card-pad" style="margin-bottom:16px;">
+      <b style="font-size:13px; display:block; margin-bottom:8px;">💳 إضافة خطة اشتراك جديدة (تظهر للكنايس كمعلومة توضيحية)</b>
+      <div class="form-grid">
+        <div class="field"><label>اسم الخطة</label><input id="pl-name" placeholder="مثال: الباقة السنوية"></div>
+        <div class="field"><label>السعر (جنيه)</label><input id="pl-price" type="number" placeholder="مثال: 600"></div>
+        <div class="field"><label>المدة (يوم)</label><input id="pl-days" type="number" placeholder="مثال: 365"></div>
+        <div class="field full"><label>المميزات (كل ميزة في سطر)</label><textarea id="pl-features" rows="3" placeholder="عدد غير محدود من المخدومين&#10;دعم فني أولوية"></textarea></div>
+      </div>
+      <button class="btn btn-primary btn-sm" onclick="SuperAdmin.addPlan()">+ حفظ الخطة</button>
+    </div>
+    <div class="card" style="margin-bottom:24px;">
+      ${SA_PLANS.length ? SA_PLANS.map(p=>`
+        <div style="padding:12px 16px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
+          <div><b>${esc(p.name)}</b> — <span class="muted">${p.price||0} ج.م / ${p.durationDays||0} يوم</span>
+            ${p.features&&p.features.length? `<div class="muted" style="font-size:11.5px; margin-top:3px;">${p.features.map(f=>esc(f)).join(' · ')}</div>`:''}
+          </div>
+          <button class="btn btn-danger btn-sm" onclick="SuperAdmin.removePlan('${p.id}')">حذف</button>
+        </div>
+      `).join('') : `<p class="muted" style="padding:16px;">لا توجد خطط مضافة بعد.</p>`}
+    </div>
+
+    <div class="card card-pad" style="margin-bottom:16px;">
+      <b style="font-size:13px; display:block; margin-bottom:8px;">🎁 إضافة كود خصم/أيام إضافية جديد</b>
+      <div class="form-grid">
+        <div class="field"><label>الكود</label><input id="dc-code" placeholder="مثال: CHURCH50" style="text-transform:uppercase;"></div>
+        <div class="field"><label>عدد الأيام الإضافية</label><input id="dc-days" type="number" placeholder="مثال: 15"></div>
+        <div class="field"><label>حد الاستخدام (اختياري)</label><input id="dc-maxuses" type="number" placeholder="اتركه فارغ = بلا حدود"></div>
+        <div class="field"><label>تاريخ الانتهاء (اختياري)</label><input id="dc-expires" type="date"></div>
+      </div>
+      <button class="btn btn-primary btn-sm" onclick="SuperAdmin.addDiscountCode()">+ حفظ الكود</button>
+    </div>
+    <div class="card">
+      ${SA_DISCOUNT_CODES.length ? SA_DISCOUNT_CODES.map(c=>`
+        <div style="padding:12px 16px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
+          <div>
+            <b style="font-family:monospace; letter-spacing:1px;">${esc(c.code)}</b> — <span class="muted">+${c.bonusDays||0} يوم</span>
+            <div class="muted" style="font-size:11.5px; margin-top:3px;">استُخدم ${c.usedCount||0}${c.maxUses?` / ${c.maxUses}`:''} مرة${c.expiresAt? ` · ينتهي في ${fmtDate(c.expiresAt)}`:''}</div>
+          </div>
+          <div class="row-actions">
+            <button class="btn btn-ghost btn-sm" onclick="SuperAdmin.toggleDiscountCode('${c.id}', ${c.active===false})">${c.active===false?'تفعيل':'إيقاف'}</button>
+            <button class="btn btn-danger btn-sm" onclick="SuperAdmin.removeDiscountCode('${c.id}')">حذف</button>
+          </div>
+        </div>
+      `).join('') : `<p class="muted" style="padding:16px;">لا توجد أكواد خصم مضافة بعد.</p>`}
+    </div>
+  `;
+};
+SuperAdmin.addPlan = async function(){
+  const name = document.getElementById('pl-name').value.trim();
+  const price = Number(document.getElementById('pl-price').value)||0;
+  const durationDays = Number(document.getElementById('pl-days').value)||0;
+  const features = document.getElementById('pl-features').value.split('\n').map(s=>s.trim()).filter(Boolean);
+  if(!name){ toast('أدخل اسم الخطة'); return; }
+  try{ await fsAddRaw('subscriptionPlans', {name, price, durationDays, features, active:true}); toast('تمت إضافة الخطة'); }
+  catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
+};
+SuperAdmin.removePlan = async function(id){
+  if(!confirm('حذف هذه الخطة؟')) return;
+  try{ await deleteDoc(doc(dbFire,'subscriptionPlans',id)); }catch(e){ console.error(e); toast('تعذر الحذف: '+e.message); }
+};
+SuperAdmin.addDiscountCode = async function(){
+  const code = document.getElementById('dc-code').value.trim().toUpperCase();
+  const bonusDays = Number(document.getElementById('dc-days').value)||0;
+  const maxUsesRaw = document.getElementById('dc-maxuses').value.trim();
+  const maxUses = maxUsesRaw ? Number(maxUsesRaw) : null;
+  const expiresAt = document.getElementById('dc-expires').value || null;
+  if(!code || !bonusDays){ toast('أدخل الكود وعدد الأيام'); return; }
+  if(SA_DISCOUNT_CODES.some(c=>c.code===code)){ toast('الكود ده موجود بالفعل'); return; }
+  try{
+    await fsAddRaw('discountCodes', {code, bonusDays, maxUses, usedCount:0, active:true, expiresAt});
+    document.getElementById('dc-code').value=''; document.getElementById('dc-days').value=''; document.getElementById('dc-maxuses').value=''; document.getElementById('dc-expires').value='';
+    toast('تم إضافة الكود');
+  }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
+};
+SuperAdmin.toggleDiscountCode = async function(id, makeActive){
+  try{ await updateDoc(doc(dbFire,'discountCodes',id), {active: makeActive}); }
+  catch(e){ console.error(e); toast('تعذر التحديث: '+e.message); }
+};
+SuperAdmin.removeDiscountCode = async function(id){
+  if(!confirm('حذف الكود ده؟')) return;
+  try{ await deleteDoc(doc(dbFire,'discountCodes',id)); }catch(e){ console.error(e); toast('تعذر الحذف: '+e.message); }
+};
 
 window.SuperAdmin = SuperAdmin;
 
@@ -2756,6 +2877,17 @@ Views.billing = function(){
       </div>
     </div>
 
+    ${(DB.plans||[]).length ? `
+      <div class="section-head"><h2>الباقات المتاحة</h2></div>
+      <div class="info-card-grid" style="margin-bottom:20px;">
+        ${DB.plans.map(p=>`<div class="card card-pad">
+          <h3 style="font-size:14.5px; margin:0 0 6px;">${esc(p.name)}</h3>
+          <div style="font-size:17px; font-weight:800; color:var(--navy); font-family:'Markazi Text',serif;">${p.price||0} ج.م / ${p.durationDays||0} يوم</div>
+          ${p.features&&p.features.length? `<ul style="margin:8px 0 0; padding-right:18px; font-size:12.5px; color:var(--ink-soft);">${p.features.map(f=>`<li>${esc(f)}</li>`).join('')}</ul>`:''}
+        </div>`).join('')}
+      </div>
+    ` : ''}
+
     ${methods.length ? `
       <div class="section-head"><h2>طرق الدفع المتاحة</h2></div>
       <div class="info-card-grid" style="margin-bottom:20px;">
@@ -2779,6 +2911,9 @@ Views.billing = function(){
         </div>
         <div class="field"><label>حوّلت من (رقمك أو اسم حسابك اللي حوّلت منه)</label>
           <input id="proof-sender" placeholder="مثال: 010xxxxxxxx أو اسمك على إنستاباي">
+        </div>
+        <div class="field"><label>كود خصم/أيام إضافية (لو عندك)</label>
+          <input id="proof-discount" placeholder="اختياري" style="text-transform:uppercase;">
         </div>
         <div class="field"><label>صورة إثبات التحويل</label><input type="file" id="proof-file" accept="image/*"></div>
         <div class="field"><label>ملاحظة (اختياري)</label><textarea id="proof-note" rows="2" placeholder="مثال: حوّلت 200 جنيه فودافون كاش"></textarea></div>
@@ -2816,6 +2951,7 @@ Billing.submitProof = async function(){
   const fileInput = document.getElementById('proof-file');
   const note = document.getElementById('proof-note').value.trim();
   const senderAccount = document.getElementById('proof-sender').value.trim();
+  const discountCode = document.getElementById('proof-discount').value.trim().toUpperCase();
   const methodSel = document.getElementById('proof-method');
   const methodName = methodSel && methodSel.selectedOptions[0] ? methodSel.selectedOptions[0].textContent : '';
   const btn = document.getElementById('proof-submit-btn');
@@ -2827,12 +2963,12 @@ Billing.submitProof = async function(){
     const imageBase64 = await compressImage(file, 900, 0.6);
     await fsAddRaw('paymentProofs', {
       churchId: CURRENT_CHURCH_ID, churchName: CURRENT_CHURCH?CURRENT_CHURCH.name:'',
-      methodId: methodSel?methodSel.value:'', methodName, senderAccount,
+      methodId: methodSel?methodSel.value:'', methodName, senderAccount, discountCode: discountCode||null,
       note, imageBase64, status:'pending', createdAt: Date.now(),
     });
     await log('إرسال إثبات دفع', note);
     toast('تم إرسال إثبات الدفع، وهيتم مراجعته من الإدارة قريبًا');
-    fileInput.value=''; document.getElementById('proof-note').value=''; document.getElementById('proof-sender').value='';
+    fileInput.value=''; document.getElementById('proof-note').value=''; document.getElementById('proof-sender').value=''; document.getElementById('proof-discount').value='';
   }catch(e){ console.error(e); toast('تعذر رفع الصورة: '+e.message); }
   finally{ btn.disabled=false; btn.textContent='إرسال للمراجعة'; }
 };
