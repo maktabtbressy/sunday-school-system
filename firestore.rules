@@ -115,7 +115,13 @@ service cloud.firestore {
     match /chatMessages/{docId} {
       allow read: if isSignedIn() && (isSuperAdmin() || belongsToChurch(resource.data.churchId));
       allow create: if isSignedIn() && (isSuperAdmin() || request.resource.data.churchId == myChurch());
-      allow update, delete: if false;
+      // تحديث محصور فقط في وسم "تمت القراءة" — كل طرف يقدر يعلّم رسائل الطرف التاني بس كمقروءة،
+      // ومحتوى الرسالة نفسه يفضل ثابت زي ما اتبعت (immutable).
+      allow update: if isSignedIn() && (
+        (isSuperAdmin() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['readBySA'])) ||
+        (belongsToChurch(resource.data.churchId) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['readByChurch']))
+      );
+      allow delete: if false;
     }
   }
 }

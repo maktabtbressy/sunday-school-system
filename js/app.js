@@ -42,7 +42,7 @@ import {
 import {
   getFirestore, collection, doc, addDoc, setDoc, updateDoc, deleteDoc,
   getDoc, getDocs, query, where, orderBy, limit, onSnapshot, serverTimestamp,
-  enableIndexedDbPersistence,
+  enableIndexedDbPersistence, writeBatch,
 } from 'https://www.gstatic.com/firebasejs/10.13.1/firebase-firestore.js';
 
 const fbApp = initializeApp(firebaseConfig);
@@ -123,7 +123,9 @@ function attachListeners(onReady){
   // رسائل الدردشة مع الإدارة
   const unsubChat = onSnapshot(query(collection(dbFire,'chatMessages'), where('churchId','==',CURRENT_CHURCH_ID)), snap=>{
     DB.chatMessages = snap.docs.map(d=>({id:d.id, ...d.data()})).sort((a,b)=>(a.createdAt||0)-(b.createdAt||0));
-    if(CURRENT_PAGE==='chat') Chat.renderMessages();
+    const unread = DB.chatMessages.filter(m=> m.senderRole==='superadmin' && m.readByChurch===false);
+    App.updateNavBadge('chat', unread.length);
+    if(CURRENT_PAGE==='chat'){ Chat.renderMessages(); markChatRead(unread, 'readByChurch'); }
   }, err=>console.error(err));
   unsubscribers.push(unsubChat);
 }
@@ -142,6 +144,16 @@ async function fsAdd(col, data){
 }
 /* fsAddRaw بيضيف من غير أي إضافة تلقائية - يُستخدم وقت التسجيل/الإعداد الأولي قبل ما نكون "داخلين" بحساب مفعّل */
 async function fsAddRaw(col, data){ const ref = await addDoc(collection(dbFire,col), data); return ref.id; }
+/* تعليم رسائل شات كمقروءة دفعة واحدة (يُستخدم من الطرفين: الكنيسة ولوحة المالك) */
+async function markChatRead(messages, field){
+  const unread = (messages||[]).filter(m=> m[field]===false);
+  if(!unread.length) return;
+  try{
+    const batch = writeBatch(dbFire);
+    unread.forEach(m=> batch.update(doc(dbFire,'chatMessages',m.id), {[field]:true}));
+    await batch.commit();
+  }catch(e){ console.error(e); }
+}
 async function fsSet(col, id, data){ await setDoc(doc(dbFire,col,id), data, {merge:true}); }
 async function fsUpdate(col, id, data){ await updateDoc(doc(dbFire,col,id), data); }
 async function fsDelete(col, id){ await deleteDoc(doc(dbFire,col,id)); }
@@ -495,8 +507,9 @@ let SA_METHODS = [];
 let SA_PROOFS = [];
 let SA_CHAT_CHURCH_ID = null;
 let SA_CHAT_MESSAGES = [];
+let SA_UNREAD_BY_CHURCH = {}; // churchId -> عدد رسائل الكنيسة اللي لسه المالك مقراهاش
 let SA_PAGE = 'churches';
-let saUnsub = null, saMethodsUnsub = null, saProofsUnsub = null, saChatUnsub = null;
+let saUnsub = null, saMethodsUnsub = null, saProofsUnsub = null, saChatUnsub = null, saChatsUnreadUnsub = null;
 
 SuperAdmin.boot = function(){
   if(saUnsub) saUnsub();
@@ -522,6 +535,17 @@ SuperAdmin.boot = function(){
     const payBadge = document.getElementById('sa-payments-badge');
     if(payBadge){ payBadge.textContent = pendingPay; payBadge.style.display = pendingPay ? 'inline-block' : 'none'; }
     if(SA_PAGE==='payments') SuperAdmin.render();
+  }, err=>console.error(err));
+
+  // كل الرسائل اللي لسه المالك مقراهاش، عبر كل الكنايس (لعرض شارة عدد + ترتيب الأولوية)
+  if(saChatsUnreadUnsub) saChatsUnreadUnsub();
+  saChatsUnreadUnsub = onSnapshot(query(collection(dbFire,'chatMessages'), where('readBySA','==',false)), snap=>{
+    const msgs = snap.docs.map(d=>({id:d.id, ...d.data()}));
+    SA_UNREAD_BY_CHURCH = {};
+    msgs.forEach(m=>{ SA_UNREAD_BY_CHURCH[m.churchId] = (SA_UNREAD_BY_CHURCH[m.churchId]||0) + 1; });
+    const badge = document.getElementById('sa-chats-badge');
+    if(badge){ badge.textContent = msgs.length; badge.style.display = msgs.length ? 'inline-block' : 'none'; }
+    if(SA_PAGE==='chats' && !SA_CHAT_CHURCH_ID) SuperAdmin.render();
   }, err=>console.error(err));
 };
 
@@ -883,9 +907,15 @@ SuperAdmin.rejectProof = async function(proofId){
 /* ---- الدردشات مع الكنايس ---- */
 SuperAdmin.renderChats = function(el){
   if(!SA_CHAT_CHURCH_ID){
+    const sorted = [...SA_CHURCHES].sort((a,b)=> (SA_UNREAD_BY_CHURCH[b.id]?1:0) - (SA_UNREAD_BY_CHURCH[a.id]?1:0));
     el.innerHTML = `<div class="section-head"><h2>اختر كنيسة للدردشة معها</h2></div>
       <div class="info-card-grid">
-        ${SA_CHURCHES.length ? SA_CHURCHES.map(c=>`<div class="church-card" onclick="SuperAdmin.openChat('${c.id}','${esc(c.name)}')"><h3>${esc(c.name)}</h3></div>`).join('')
+        ${sorted.length ? sorted.map(c=>{
+          const unread = SA_UNREAD_BY_CHURCH[c.id]||0;
+          return `<div class="church-card" style="position:relative;" onclick="SuperAdmin.openChat('${c.id}','${esc(c.name)}')">
+            <h3>${esc(c.name)}${unread? ` <span class="badge-count" style="display:inline-block; margin-right:6px;">${unread}</span>`:''}</h3>
+          </div>`;
+        }).join('')
           : `<p class="muted">لا توجد كنايس مسجلة بعد.</p>`}
       </div>`;
     return;
@@ -923,7 +953,10 @@ SuperAdmin.openChat = function(churchId){
   if(saChatUnsub) saChatUnsub();
   saChatUnsub = onSnapshot(query(collection(dbFire,'chatMessages'), where('churchId','==',churchId)), snap=>{
     SA_CHAT_MESSAGES = snap.docs.map(d=>({id:d.id, ...d.data()})).sort((a,b)=>(a.createdAt||0)-(b.createdAt||0));
-    if(SA_PAGE==='chats' && SA_CHAT_CHURCH_ID===churchId) SuperAdmin.renderChatMessages();
+    if(SA_PAGE==='chats' && SA_CHAT_CHURCH_ID===churchId){
+      SuperAdmin.renderChatMessages();
+      markChatRead(SA_CHAT_MESSAGES.filter(m=>m.senderRole!=='superadmin'), 'readBySA');
+    }
   }, err=>console.error(err));
   SuperAdmin.render();
 };
@@ -955,7 +988,7 @@ SuperAdmin.sendChat = async function(){
   if((!text && !file) || !SA_CHAT_CHURCH_ID) return;
   input.value='';
   try{
-    const payload = { churchId: SA_CHAT_CHURCH_ID, senderRole:'superadmin', senderName: CURRENT_USER.name, text, createdAt: Date.now() };
+    const payload = { churchId: SA_CHAT_CHURCH_ID, senderRole:'superadmin', senderName: CURRENT_USER.name, text, createdAt: Date.now(), readBySA:true, readByChurch:false };
     if(file) payload.imageBase64 = await compressImage(file, 900, 0.6);
     await addDoc(collection(dbFire,'chatMessages'), payload);
     SuperAdmin.clearChatFile();
@@ -976,7 +1009,7 @@ const NAV_ITEMS = [
   {id:'activities', label:'الأنشطة', ic:'❖'},
   {id:'reports', label:'التقارير', ic:'▥'},
   {id:'billing', label:'الاشتراك والدفع', ic:'💳'},
-  {id:'chat', label:'الدردشة مع الإدارة', ic:'💬', adminOnly:true},
+  {id:'chat', label:'الدردشة مع الإدارة', ic:'💬', adminOnly:true, badge:true},
   {id:'users', label:'المستخدمون والصلاحيات', ic:'⚿', adminOnly:true},
   {id:'settings', label:'الإعدادات', ic:'⚙', adminOnly:true},
   {id:'backup', label:'النسخ الاحتياطي', ic:'⟲', adminOnly:true},
@@ -986,8 +1019,15 @@ function buildNav(){
   const nav = document.getElementById('nav');
   nav.innerHTML = NAV_ITEMS
     .filter(it=> !it.adminOnly || (CURRENT_USER && (CURRENT_USER.role==='admin' || IMPERSONATING)))
-    .map(it=>`<li><a class="nav-a" data-page="${it.id}" onclick="App.navigate('${it.id}')"><span class="ic">${it.ic}</span>${it.label}</a></li>`).join('');
+    .map(it=>`<li><a class="nav-a" data-page="${it.id}" onclick="App.navigate('${it.id}')"><span class="ic">${it.ic}</span>${it.label}${it.badge?` <span class="badge-count" id="nav-badge-${it.id}" style="display:none;">0</span>`:''}</a></li>`).join('');
 }
+/* تحديث عدد رسائل غير مقروءة (أو أي عدّاد) جنب عنصر في القائمة الجانبية للكنيسة */
+App.updateNavBadge = function(id, count){
+  const el = document.getElementById('nav-badge-'+id);
+  if(!el) return;
+  el.textContent = count;
+  el.style.display = count>0 ? 'inline-block' : 'none';
+};
 App.navigate = function(page, param){
   CURRENT_PAGE = page; CURRENT_PARAM = param;
   UI.closeSidebar();
@@ -2183,6 +2223,7 @@ Views.chat = function(){
     </div>
   `;
   Chat.renderMessages();
+  markChatRead((DB.chatMessages||[]).filter(m=>m.senderRole==='superadmin' && m.readByChurch===false), 'readByChurch');
 };
 Chat.previewFile = function(){
   const file = document.getElementById('chat-file').files[0];
@@ -2222,7 +2263,7 @@ Chat.send = async function(){
   try{
     const payload = {
       churchId: CURRENT_CHURCH_ID, senderRole: IMPERSONATING?'admin':CURRENT_USER.role, senderName: CURRENT_USER.name,
-      text, createdAt: Date.now(),
+      text, createdAt: Date.now(), readBySA:false, readByChurch:true,
     };
     if(file) payload.imageBase64 = await compressImage(file, 900, 0.6);
     await fsAddRaw('chatMessages', payload);
