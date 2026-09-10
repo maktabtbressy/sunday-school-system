@@ -276,8 +276,14 @@ async function fsAdd(col, data){
 /* fsAddRaw بيضيف من غير أي إضافة تلقائية - يُستخدم وقت التسجيل/الإعداد الأولي قبل ما نكون "داخلين" بحساب مفعّل */
 async function fsAddRaw(col, data){ const ref = await addDoc(collection(dbFire,col), data); return ref.id; }
 /* تعليم مستندات (رسائل شات أو تذاكر) كمقروءة دفعة واحدة عن طريق تحديث حقل واحد بس */
-async function markChatRead(items, field, col='chatMessages'){
-  const unread = (items||[]).filter(m=> m[field]===false);
+/* حذف رسالة شات (نص أو مرفق) — متاحة لصاحب الرسالة أو للمالك، حسب قواعد الأمان */
+async function deleteChatMessage(id){
+  if(!confirm('حذف هذه الرسالة نهائيًا؟')) return;
+  try{ await deleteDoc(doc(dbFire,'chatMessages',id)); }
+  catch(e){ console.error(e); toast('تعذر حذف الرسالة: '+e.message); }
+}
+window.deleteChatMessage = deleteChatMessage;
+async function markChatRead(items, field, col='chatMessages'){  const unread = (items||[]).filter(m=> m[field]===false);
   if(!unread.length) return;
   try{
     const batch = writeBatch(dbFire);
@@ -641,6 +647,8 @@ let SA_CHAT_MESSAGES = [];
 let SA_UNREAD_BY_CHURCH = {}; // churchId -> عدد رسائل الكنيسة اللي لسه المالك مقراهاش
 let SA_TICKETS = [];
 let SA_TICKET_FILTERS = {type:'', status:'', search:'', from:'', to:''};
+let SA_PUBLIC_CONFIG = {};
+let SA_ADMIN_LINKS = [];
 let SA_PAGE = 'churches';
 let saUnsub = null, saMethodsUnsub = null, saProofsUnsub = null, saChatUnsub = null, saChatsUnreadUnsub = null, saTicketsUnsub = null, saTicketTypesUnsub = null;
 
@@ -697,9 +705,20 @@ SuperAdmin.boot = function(){
     if(badge){ badge.textContent = unreadCount; badge.style.display = unreadCount ? 'inline-block' : 'none'; }
     if(SA_PAGE==='tickets') SuperAdmin.render();
   }, err=>console.error(err));
-};
 
-const SA_PAGE_TITLES = {churches:'الكنايس', requests:'طلبات جديدة', methods:'طرق الدفع', payments:'مراجعة المدفوعات', chats:'الدردشات', tickets:'التذاكر'};
+  // إعدادات المنصة العامة (رابط تواصل معنا يظهر لأي زائر)
+  onSnapshot(doc(dbFire,'platformConfig','public'), d=>{
+    SA_PUBLIC_CONFIG = d.exists() ? d.data() : {};
+    if(SA_PAGE==='links') SuperAdmin.render();
+  }, err=>console.error(err));
+
+  // روابط إدارية سريعة خاصة بالمالك
+  onSnapshot(collection(dbFire,'adminLinks'), snap=>{
+    SA_ADMIN_LINKS = snap.docs.map(d=>({id:d.id, ...d.data()}));
+    if(SA_PAGE==='links') SuperAdmin.render();
+  }, err=>console.error(err));
+};
+const SA_PAGE_TITLES = {churches:'الكنايس', requests:'طلبات جديدة', methods:'طرق الدفع', payments:'مراجعة المدفوعات', chats:'الدردشات', tickets:'التذاكر', links:'روابط'};
 SuperAdmin.navigate = function(page){
   SA_PAGE = page;
   UI.closeSaSidebar();
@@ -733,6 +752,7 @@ SuperAdmin.render = function(){
   if(SA_PAGE==='payments'){ el.className=''; SuperAdmin.renderPayments(el); return; }
   if(SA_PAGE==='chats'){ el.className=''; SuperAdmin.renderChats(el); return; }
   if(SA_PAGE==='tickets'){ el.className=''; SuperAdmin.renderTickets(el); return; }
+  if(SA_PAGE==='links'){ el.className=''; SuperAdmin.renderLinks(el); return; }
   el.className = 'church-grid';
   if(SA_PAGE==='requests'){
     const pending = SA_CHURCHES.filter(c=>c.status==='pending');
@@ -1142,7 +1162,10 @@ SuperAdmin.renderChatMessages = function(){
     const mine = m.senderRole === 'superadmin';
     return `<div style="display:flex; ${mine?'justify-content:flex-end;':'justify-content:flex-start;'} margin-bottom:10px;">
       <div style="max-width:72%; padding:9px 13px; border-radius:12px; font-size:13.5px; ${mine?'background:var(--navy); color:#fff;':'background:var(--paper); color:var(--ink);'}">
-        <div style="font-size:11px; opacity:.7; margin-bottom:3px;">${esc(m.senderName)}</div>
+        <div style="display:flex; justify-content:space-between; gap:10px; font-size:11px; opacity:.7; margin-bottom:3px;">
+          <span>${esc(m.senderName)}</span>
+          <a style="cursor:pointer; ${mine?'color:#fff;':'color:var(--absent);'}" title="حذف الرسالة" onclick="deleteChatMessage('${m.id}')">🗑</a>
+        </div>
         ${m.imageBase64? `<img src="${m.imageBase64}" style="max-width:100%; border-radius:8px; margin-bottom:${m.text?'6px':'0'}; cursor:pointer;" onclick="window.open('${m.imageBase64}','_blank')">` : ''}
         ${m.text? esc(m.text) : ''}
       </div>
@@ -1307,6 +1330,71 @@ SuperAdmin.saveTicketUpdate = async function(id){
     UI.closeModal();
     toast('تم الحفظ وإرسال الرد للكنيسة');
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
+};
+
+/* ---- الروابط: تواصل معنا العام (لأي زائر) + روابط إدارية سريعة (خاصة بالمالك) ---- */
+SuperAdmin.renderLinks = function(el){
+  el.innerHTML = `
+    <div class="card card-pad" style="margin-bottom:16px;">
+      <b style="font-size:13px; display:block; margin-bottom:8px;">💬 رابط تواصل معنا (يظهر لأي زائر في صفحة الدخول، حتى قبل ما يسجّل)</b>
+      <div style="display:flex; gap:8px;">
+        <input id="pc-contact-link" value="${esc(SA_PUBLIC_CONFIG.contactLink||'')}" placeholder="مثال: https://wa.me/2010xxxxxxxx" style="flex:1;">
+        <button class="btn btn-primary btn-sm" onclick="SuperAdmin.savePublicContact()">حفظ</button>
+      </div>
+      <p class="muted" style="margin-top:6px;">تقدر تحط لينك واتساب أو إيميل (mailto:) أو أي رابط تواصل تانى.</p>
+    </div>
+
+    <div class="card card-pad" style="margin-bottom:16px;">
+      <b style="font-size:13px; display:block; margin-bottom:8px;">🔗 إضافة رابط إداري جديد</b>
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <input id="al-name" placeholder="اسم الرابط — مثال: مستودع الكود" style="flex:1; min-width:160px;">
+        <input id="al-url" placeholder="https://..." style="flex:1; min-width:160px;">
+        <button class="btn btn-primary btn-sm" onclick="SuperAdmin.addAdminLink()">+ حفظ الرابط</button>
+      </div>
+    </div>
+
+    <div class="card" style="padding:0;">
+      ${SA_ADMIN_LINKS.length ? SA_ADMIN_LINKS.map(l=>`
+        <div style="padding:12px 16px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
+          <div><b style="font-size:13px;">${esc(l.name)}</b><div class="muted" style="font-size:11.5px; word-break:break-all;">${esc(l.url)}</div></div>
+          <div class="row-actions">
+            <a class="btn btn-ghost btn-sm" href="${esc(l.url)}" target="_blank" rel="noopener">فتح</a>
+            <button class="btn btn-ghost btn-sm" onclick="SuperAdmin.editAdminLink('${l.id}')">تعديل</button>
+            <button class="btn btn-danger btn-sm" onclick="SuperAdmin.removeAdminLink('${l.id}')">حذف</button>
+          </div>
+        </div>
+      `).join('') : `<p class="muted" style="padding:16px;">لا توجد روابط إدارية مضافة بعد.</p>`}
+    </div>
+  `;
+};
+SuperAdmin.savePublicContact = async function(){
+  const val = document.getElementById('pc-contact-link').value.trim();
+  try{ await setDoc(doc(dbFire,'platformConfig','public'), { contactLink: val }, {merge:true}); toast('تم الحفظ'); }
+  catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
+};
+SuperAdmin.addAdminLink = async function(){
+  const name = document.getElementById('al-name').value.trim();
+  const url = document.getElementById('al-url').value.trim();
+  if(!name||!url){ toast('أدخل اسم الرابط والعنوان'); return; }
+  try{
+    await fsAddRaw('adminLinks', {name, url});
+    document.getElementById('al-name').value=''; document.getElementById('al-url').value='';
+  }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
+};
+SuperAdmin.editAdminLink = async function(id){
+  const l = SA_ADMIN_LINKS.find(x=>x.id===id);
+  if(!l) return;
+  const name = prompt('اسم الرابط:', l.name);
+  if(name===null) return;
+  const url = prompt('عنوان الرابط:', l.url);
+  if(url===null) return;
+  try{ await updateDoc(doc(dbFire,'adminLinks',id), {name:name.trim(), url:url.trim()}); }
+  catch(e){ console.error(e); toast('تعذر التعديل: '+e.message); }
+};
+SuperAdmin.removeAdminLink = async function(id){
+  if(!confirm('حذف هذا الرابط؟')) return;
+  try{ await deleteDoc(doc(dbFire,'adminLinks',id)); }
+  catch(e){ console.error(e); toast('تعذر الحذف: '+e.message); }
 };
 
 window.SuperAdmin = SuperAdmin;
@@ -2672,7 +2760,10 @@ Chat.renderMessages = function(){
     const mine = m.senderRole !== 'superadmin';
     return `<div style="display:flex; ${mine?'justify-content:flex-start;':'justify-content:flex-end;'} margin-bottom:10px;">
       <div style="max-width:72%; padding:9px 13px; border-radius:12px; font-size:13.5px; ${mine?'background:var(--paper); color:var(--ink);':'background:var(--navy); color:#fff;'}">
-        <div style="font-size:11px; opacity:.7; margin-bottom:3px;">${esc(m.senderName)}</div>
+        <div style="display:flex; justify-content:space-between; gap:10px; font-size:11px; opacity:.7; margin-bottom:3px;">
+          <span>${esc(m.senderName)}</span>
+          ${mine? `<a style="cursor:pointer; color:var(--absent);" title="حذف الرسالة" onclick="deleteChatMessage('${m.id}')">🗑</a>` : ''}
+        </div>
         ${m.imageBase64? `<img src="${m.imageBase64}" style="max-width:100%; border-radius:8px; margin-bottom:${m.text?'6px':'0'}; cursor:pointer;" onclick="window.open('${m.imageBase64}','_blank')">` : ''}
         ${m.text? esc(m.text) : ''}
       </div>
@@ -2801,6 +2892,12 @@ App.globalSearch = function(q){
 /* ---------- Boot ---------- */
 document.getElementById('login-pass').addEventListener('keydown', e=>{ if(e.key==='Enter') App.login(); });
 document.getElementById('login-user').addEventListener('keydown', e=>{ if(e.key==='Enter') document.getElementById('login-pass').focus(); });
+// رابط "تواصل معنا" العام في شاشة الدخول — بيتحمّل حتى قبل تسجيل الدخول
+getDoc(doc(dbFire,'platformConfig','public')).then(d=>{
+  const link = d.exists() ? (d.data().contactLink||'') : '';
+  const el = document.getElementById('public-contact-link');
+  if(el && link){ el.style.display='block'; el.innerHTML = `<a href="${esc(link)}" target="_blank" rel="noopener">💬 تواصل معنا</a>`; }
+}).catch(()=>{});
 // ملاحظة: باقي الإقلاع (تحميل بيانات المستخدم والتنقل للوحة التحكم) يتم داخل onAuthStateChanged بالأعلى.
 
 /* تعريض الكائنات اللازمة للـ window لأن هذا الملف module والـ onclick في الـ HTML بيدور في النطاق العام */

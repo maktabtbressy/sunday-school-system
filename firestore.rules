@@ -121,7 +121,10 @@ service cloud.firestore {
         (isSuperAdmin() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['readBySA'])) ||
         (belongsToChurch(resource.data.churchId) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['readByChurch']))
       );
-      allow delete: if false;
+      allow delete: if isSignedIn() && (
+        isSuperAdmin() ||
+        (belongsToChurch(resource.data.churchId) && resource.data.senderRole != 'superadmin')
+      );
     }
     // ===== أنواع التذاكر المتاحة (مستند واحد 'main' يديره المالك) =====
     match /ticketTypes/{docId} {
@@ -143,6 +146,16 @@ service cloud.firestore {
          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','cancelledByChurch']))
       );
       allow delete: if false;
+    }
+    // ===== إعدادات عامة للمنصة (زي رابط "تواصل معنا") — تظهر لأي زائر حتى قبل تسجيل الدخول =====
+    match /platformConfig/{docId} {
+      allow read: if true;
+      allow write: if isSuperAdmin();
+    }
+
+    // ===== روابط إدارية سريعة (خاصة بالمالك فقط، زي روابط GitHub/Firebase) =====
+    match /adminLinks/{docId} {
+      allow read, write: if isSuperAdmin();
     }
   }
 }
