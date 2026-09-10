@@ -33,6 +33,120 @@ function toast(msg){
 }
 function byId(arr, id){ return (arr||[]).find(x=>x.id===id); }
 function nameOf(arr, id, field='name'){ const o = byId(arr,id); return o ? o[field] : '—'; }
+/* تحويل أي رابط داخل نص لرابط قابل للضغط (يُستخدم في عرض أرقام/حسابات الدفع لدعم لينكات دفع زي إنستاباي) */
+function linkifyText(text){
+  const escaped = esc(text);
+  const withLinks = escaped.replace(/((https?:\/\/|www\.)[^\s<]+)/gi, (match)=>{
+    const href = match.toLowerCase().startsWith('http') ? match : 'https://'+match;
+    return `<a href="${href}" target="_blank" rel="noopener" style="color:var(--navy); text-decoration:underline; word-break:break-all;">${match}</a>`;
+  });
+  return withLinks.replace(/\n/g,'<br>');
+}
+/* تقسيم نص أرقام/حسابات دفع مفصولة بفاصلة أو فاصلة عربية أو فاصلة منقوطة أو نقطة، كل رقم يظهر في سطر منفصل */
+function splitAccounts(text){ return String(text||'').split(/[,،؛\n]+/).map(s=>s.trim()).filter(Boolean); }
+/* هذه الدوال الثلاثة كانت مُستخدمة في عشرات الأماكن (نماذج المخدوم/الخادم، صفحة المراحل
+   والفصول، تسجيل الحضور) لكنها لم تكن مُعرّفة أصلًا — وهو السبب الحقيقي وراء توقف
+   أزرار "إضافة مخدوم" و"إضافة خادم" وصفحة "المراحل والفصول" عن الاستجابة تمامًا. */
+function gradesOfStage(stageId){ return (DB.grades||[]).filter(g=>g.stageId===stageId).sort((a,b)=>(a.order||0)-(b.order||0)); }
+function classesOfGrade(gradeId){ return (DB.classes||[]).filter(c=>c.gradeId===gradeId); }
+function stageOfClass(classId){ const c=byId(DB.classes,classId); if(!c) return null; const g=byId(DB.grades,c.gradeId); return g?g.stageId:null; }
+
+/* ---- حقل صورة شخصية قابل لإعادة الاستخدام (مخدوم/خادم/مستخدم) — رفع/حذف مع صورة افتراضية ---- */
+function photoFieldHtml(currentPhoto){
+  return `
+  <div class="field full" style="text-align:center;">
+    <label>الصورة الشخصية</label>
+    <div id="f-photo-preview" style="width:86px; height:86px; border-radius:50%; overflow:hidden; margin:6px auto; background:var(--gold-soft); color:var(--navy); display:flex; align-items:center; justify-content:center; border:1px solid var(--line); font-size:30px; font-weight:800;">
+      ${currentPhoto? `<img src="${currentPhoto}" style="width:100%; height:100%; object-fit:cover;">` : '👤'}
+    </div>
+    <input type="hidden" id="f-photo-data" value="${currentPhoto||''}">
+    <input type="file" id="f-photo-file" accept="image/*" style="display:none;" onchange="handlePhotoSelect()">
+    <div style="display:flex; gap:8px; justify-content:center; margin-top:6px;">
+      <button type="button" class="btn btn-ghost btn-sm" onclick="document.getElementById('f-photo-file').click()">📷 اختيار صورة</button>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="clearPhotoField()">🗑 حذف الصورة</button>
+    </div>
+  </div>`;
+}
+async function handlePhotoSelect(){
+  const file = document.getElementById('f-photo-file').files[0];
+  if(!file) return;
+  try{
+    const img = await compressImage(file, 400, 0.75);
+    document.getElementById('f-photo-data').value = img;
+    document.getElementById('f-photo-preview').innerHTML = `<img src="${img}" style="width:100%; height:100%; object-fit:cover;">`;
+  }catch(e){ console.error(e); toast('تعذر معالجة الصورة'); }
+}
+function clearPhotoField(){
+  document.getElementById('f-photo-data').value = '';
+  document.getElementById('f-photo-file').value = '';
+  document.getElementById('f-photo-preview').innerHTML = '👤';
+}
+/* ---- قراءة باركود/QR بكاميرا الجهاز (تُستخدم في نماذج الكود وتسجيل الحضور) ---- */
+const Scanner = {};
+Scanner.open = function(onResult){
+  UI.openModal('قراءة باركود / QR', `
+    <video id="scanner-video" style="width:100%; border-radius:10px; background:#000;" playsinline muted></video>
+    <canvas id="scanner-canvas" style="display:none;"></canvas>
+    <p class="muted" id="scanner-hint" style="margin-top:10px; text-align:center;">وجّه الكاميرا نحو الكود...</p>
+  `, `<button class="btn btn-ghost btn-block" onclick="Scanner.close()">إلغاء</button>`);
+  Scanner._onResult = onResult;
+  Scanner._start();
+};
+Scanner._stream = null;
+Scanner._raf = null;
+Scanner._start = async function(){
+  if(!window.jsQR){
+    const hint = document.getElementById('scanner-hint');
+    if(hint) hint.textContent = 'تعذر تحميل مكتبة قراءة الأكواد — تأكد من اتصال الإنترنت';
+    return;
+  }
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}});
+    Scanner._stream = stream;
+    const video = document.getElementById('scanner-video');
+    if(!video){ stream.getTracks().forEach(t=>t.stop()); return; } // المودال اتقفل قبل ما الكاميرا تجهز
+    video.srcObject = stream;
+    await video.play();
+    Scanner._tick();
+  }catch(e){
+    const hint = document.getElementById('scanner-hint');
+    if(hint) hint.textContent = 'تعذر تشغيل الكاميرا: '+e.message+' — تأكد من السماح بالوصول للكاميرا';
+  }
+};
+Scanner._tick = function(){
+  const video = document.getElementById('scanner-video');
+  const canvas = document.getElementById('scanner-canvas');
+  if(!video || !canvas) return; // المودال اتقفل
+  if(video.readyState !== video.HAVE_ENOUGH_DATA){ Scanner._raf = requestAnimationFrame(Scanner._tick); return; }
+  canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  const imgData = ctx.getImageData(0,0,canvas.width,canvas.height);
+  const code = jsQR(imgData.data, imgData.width, imgData.height);
+  if(code && code.data){
+    const result = code.data;
+    Scanner.close();
+    if(Scanner._onResult) Scanner._onResult(result);
+  } else {
+    Scanner._raf = requestAnimationFrame(Scanner._tick);
+  }
+};
+Scanner.close = function(){
+  if(Scanner._raf) cancelAnimationFrame(Scanner._raf);
+  Scanner._raf = null;
+  if(Scanner._stream) Scanner._stream.getTracks().forEach(t=>t.stop());
+  Scanner._stream = null;
+  UI.closeModal();
+};
+window.Scanner = Scanner;
+function codeFieldHtml(id, value, placeholder){
+  return `<div class="field"><label>الكود / الباركود</label>
+    <div style="display:flex; gap:6px;">
+      <input id="${id}" value="${esc(value||'')}" placeholder="${placeholder||''}" style="flex:1;">
+      <button type="button" class="btn btn-ghost btn-sm" onclick="Scanner.open(v=>document.getElementById('${id}').value=v)" title="قراءة عن طريق الكاميرا">📷</button>
+    </div>
+  </div>`;
+}
 
 /* ---------------- Firebase ---------------- */
 import { firebaseConfig } from './firebase-config.js';
@@ -667,8 +781,12 @@ SuperAdmin.openChurch = async function(id){
       </div>
       <button class="btn btn-gold btn-block" onclick="SuperAdmin.extend('${c.id}')" style="margin-bottom:10px;">تفعيل / تمديد</button>
       ${c.status==='exempt'
-        ? `<button class="btn btn-ghost btn-block" onclick="SuperAdmin.unexempt('${c.id}')" style="margin-bottom:18px;">إلغاء الإعفاء (رجوع لنظام الاشتراك)</button>`
-        : `<button class="btn btn-ghost btn-block" onclick="SuperAdmin.exempt('${c.id}')" style="margin-bottom:18px;">🎁 إعفاء دائم (بدون اشتراك)</button>`
+        ? `<button class="btn btn-ghost btn-block" onclick="SuperAdmin.unexempt('${c.id}')" style="margin-bottom:10px;">إلغاء الإعفاء (رجوع لنظام الاشتراك)</button>`
+        : `<button class="btn btn-ghost btn-block" onclick="SuperAdmin.exempt('${c.id}')" style="margin-bottom:10px;">🎁 إعفاء دائم (بدون اشتراك)</button>`
+      }
+      ${(c.status==='trial'||c.status==='active')
+        ? `<button class="btn btn-ghost btn-block" style="margin-bottom:18px; color:var(--absent); border-color:#E7C6BE;" onclick="SuperAdmin.deactivate('${c.id}')">⛔ إلغاء تفعيل الاشتراك الآن</button>`
+        : ''
       }
     `}
     <h3 style="font-size:14px;">مستخدمو الكنيسة</h3>
@@ -715,6 +833,13 @@ SuperAdmin.exempt = async function(id){
   try{
     await updateDoc(doc(dbFire,'churches',id), {status:'exempt'});
     UI.closeModal(); toast('تم إعفاء الكنيسة — بقت مفتوحة دائمًا');
+  }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
+};
+SuperAdmin.deactivate = async function(id){
+  if(!confirm('هل تريد إلغاء تفعيل اشتراك هذه الكنيسة فورًا؟ لن تقدر تدخل النظام إلا بعد ما تفعّل الاشتراك تاني.')) return;
+  try{
+    await updateDoc(doc(dbFire,'churches',id), {status:'active', activeUntil: new Date(Date.now()-1000).toISOString()});
+    UI.closeModal(); toast('تم إلغاء تفعيل اشتراك الكنيسة');
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
 };
 SuperAdmin.unexempt = async function(id){
@@ -783,7 +908,9 @@ SuperAdmin.renderMethods = function(el){
         <div class="section-head" style="margin-bottom:6px;"><h2 style="font-size:14.5px;">${esc(m.name)}</h2>
           <span class="pill ${m.active!==false?'pill-active':'pill-inactive'}">${m.active!==false?'مفعّلة':'متوقفة'}</span>
         </div>
-        <div style="font-weight:800; color:var(--navy); font-family:'Markazi Text',serif;">${esc(m.details)}</div>
+        <div style="font-size:14.5px; font-weight:800; color:var(--navy); font-family:'Markazi Text',serif; line-height:1.7;">
+          ${(m.accounts&&m.accounts.length? m.accounts : splitAccounts(m.details)).map(a=>linkifyText(a)).join('<br>')}
+        </div>
         ${m.qrImage? `<img src="${m.qrImage}" style="max-width:100%; max-height:140px; border-radius:8px; border:1px solid var(--line); margin-top:8px;">` : ''}
         ${m.instructions?`<p class="muted" style="margin-top:6px;">${esc(m.instructions)}</p>`:''}
         <div class="row-actions" style="margin-top:12px;">
@@ -799,7 +926,9 @@ SuperAdmin.openMethodForm = function(id){
   const m = id ? SA_METHODS.find(x=>x.id===id) : {};
   UI.openModal(id?'تعديل طريقة دفع':'إضافة طريقة دفع', `
     <div class="field"><label>اسم الطريقة</label><input id="f-name" value="${esc(m.name||'')}" placeholder="مثال: فودافون كاش"></div>
-    <div class="field"><label>الرقم / الحساب</label><input id="f-details" value="${esc(m.details||'')}" placeholder="مثال: 010xxxxxxxx"></div>
+    <div class="field"><label>الأرقام/الحسابات (رقم أو لينك دفع في كل سطر، أو افصل بينهم بفاصلة , أو ، أو ؛)</label>
+      <textarea id="f-details" rows="3" placeholder="مثال:&#10;01012345678&#10;https://ipn.eg/S/xxxx/instapay/xxx">${esc((m.accounts&&m.accounts.length? m.accounts.join('\n') : m.details)||'')}</textarea>
+    </div>
     <div class="field"><label>صورة / QR كود (اختياري)</label><input type="file" id="f-qr" accept="image/*">
       ${m.qrImage? `<img src="${m.qrImage}" style="max-width:160px; margin-top:8px; border-radius:8px; border:1px solid var(--line);">`:''}
     </div>
@@ -809,9 +938,9 @@ SuperAdmin.openMethodForm = function(id){
 };
 SuperAdmin.saveMethod = async function(id){
   const name = document.getElementById('f-name').value.trim();
-  const details = document.getElementById('f-details').value.trim();
-  if(!name||!details) return toast('أدخل اسم الطريقة والرقم/الحساب');
-  const data = { name, details, instructions: document.getElementById('f-instructions').value.trim(), active: document.getElementById('f-active').checked };
+  const accounts = splitAccounts(document.getElementById('f-details').value);
+  if(!name||!accounts.length) return toast('أدخل اسم الطريقة ورقم/حساب واحد على الأقل');
+  const data = { name, accounts, details: accounts.join(', '), instructions: document.getElementById('f-instructions').value.trim(), active: document.getElementById('f-active').checked };
   const qrFile = document.getElementById('f-qr').files[0];
   try{
     if(qrFile) data.qrImage = await compressImage(qrFile, 500, 0.7);
@@ -908,6 +1037,10 @@ SuperAdmin.proofCard = function(p){
   return `<div class="card card-pad">
     <div class="section-head" style="margin-bottom:8px;"><h2 style="font-size:14.5px;">${esc(p.churchName||'—')}</h2>${statusPill}</div>
     <img src="${p.imageBase64}" style="width:100%; border-radius:8px; border:1px solid var(--line); margin-bottom:8px; cursor:pointer;" onclick="window.open('${p.imageBase64}','_blank')">
+    <div class="kv" style="margin-bottom:8px;">
+      <b>حوّل عن طريق</b><span>${esc(p.methodName||'—')}</span>
+      <b>حوّل من</b><span style="font-weight:800; color:var(--navy);">${esc(p.senderAccount||'—')}</span>
+    </div>
     ${p.note? `<p class="muted">${esc(p.note)}</p>`:''}
     <p class="muted" style="font-size:11.5px;">${p.createdAt? fmtDate(new Date(p.createdAt).toISOString()):''}</p>
     ${p.status==='pending' ? `
@@ -1364,8 +1497,9 @@ Members.openForm = function(id){
   const m = id ? byId(DB.members,id) : {};
   UI.openModal(id?'تعديل بيانات مخدوم':'إضافة مخدوم جديد', `
     <div class="form-grid">
+      ${photoFieldHtml(m.photo)}
       <div class="field"><label>الاسم بالكامل</label><input id="f-name" value="${esc(m.name||'')}"></div>
-      <div class="field"><label>الكود</label><input id="f-code" value="${esc(m.code|| 'M-'+(DB.members.length+1).toString().padStart(3,'0'))}"></div>
+      ${codeFieldHtml('f-code', m.code|| 'M-'+(DB.members.length+1).toString().padStart(3,'0'))}
       <div class="field"><label>تاريخ الميلاد</label><input type="date" id="f-birth" value="${m.birthDate||''}"></div>
       <div class="field"><label>الجنس</label><select id="f-gender"><option value="ذكر" ${m.gender==='ذكر'?'selected':''}>ذكر</option><option value="أنثى" ${m.gender==='أنثى'?'selected':''}>أنثى</option></select></div>
       <div class="field"><label>المرحلة</label><select id="f-stage" onchange="Members._refreshGradeOptions()">${selectOptions(DB.stages,m.stageId)}</select></div>
@@ -1395,6 +1529,7 @@ Members.save = async function(id){
   if(!name){ toast('من فضلك أدخل الاسم'); return; }
   const data = {
     name, code:document.getElementById('f-code').value.trim(), birthDate:document.getElementById('f-birth').value,
+    photo: document.getElementById('f-photo-data').value,
     gender:document.getElementById('f-gender').value, stageId:document.getElementById('f-stage').value,
     gradeId:document.getElementById('f-grade').value,
     classId:document.getElementById('f-class').value, phone:document.getElementById('f-phone').value.trim(),
@@ -1545,8 +1680,9 @@ Servants.openForm = function(id){
   const s = id ? byId(DB.servants,id) : {};
   UI.openModal(id?'تعديل بيانات خادم':'إضافة خادم جديد', `
     <div class="form-grid">
+      ${photoFieldHtml(s.photo)}
       <div class="field"><label>الاسم</label><input id="f-name" value="${esc(s.name||'')}"></div>
-      <div class="field"><label>الكود</label><input id="f-code" value="${esc(s.code|| 'S-'+(DB.servants.length+1).toString().padStart(3,'0'))}"></div>
+      ${codeFieldHtml('f-code', s.code|| 'S-'+(DB.servants.length+1).toString().padStart(3,'0'))}
       <div class="field"><label>الهاتف</label><input id="f-phone" value="${esc(s.phone||'')}"></div>
       <div class="field"><label>تاريخ بدء الخدمة</label><input type="date" id="f-start" value="${s.startDate||''}"></div>
       <div class="field"><label>الجنس</label><select id="f-gender"><option value="ذكر" ${s.gender==='ذكر'?'selected':''}>ذكر</option><option value="أنثى" ${s.gender==='أنثى'?'selected':''}>أنثى</option></select></div>
@@ -1572,6 +1708,7 @@ Servants.save = async function(id){
   if(!name){ toast('من فضلك أدخل الاسم'); return; }
   const data = {
     name, code:document.getElementById('f-code').value.trim(), phone:document.getElementById('f-phone').value.trim(),
+    photo: document.getElementById('f-photo-data').value,
     gender:document.getElementById('f-gender').value,
     startDate:document.getElementById('f-start').value, stageId:document.getElementById('f-stage').value,
     gradeId:document.getElementById('f-grade').value,
@@ -1609,7 +1746,7 @@ Views.stages = function(){
         const memberCount = DB.members.filter(m=>m.stageId===st.id).length;
         return `<div class="card card-pad">
           <div class="section-head"><h2 style="font-size:15px;">${esc(st.name)} <span class="muted">(${memberCount} مخدوم)</span></h2>
-            <div class="row-actions no-print"><button class="btn btn-ghost btn-sm" onclick="Stages.openStageForm('${st.id}')">تعديل</button><button class="btn btn-danger btn-sm" onclick="Stages.removeStage('${st.id}')">حذف</button></div>
+            <div class="row-actions no-print"><button class="btn btn-ghost btn-sm" onclick="Stages.autoFillGrades('${st.id}')">⚡ توليد صفوف تلقائيًا</button><button class="btn btn-ghost btn-sm" onclick="Stages.openStageForm('${st.id}')">تعديل</button><button class="btn btn-danger btn-sm" onclick="Stages.removeStage('${st.id}')">حذف</button></div>
           </div>
           ${grades.length? grades.map(g=>{
             const classes = classesOfGrade(g.id);
@@ -1708,12 +1845,45 @@ Stages.removeClass = async function(id){
   try{ await fsDelete('classes', id); await log('حذف فصل', id); App.navigate('stages'); }
   catch(e){ console.error(e); toast('تعذر الحذف: '+e.message); }
 };
+/* قوالب أسماء صفوف دراسية شائعة، تُقترح تلقائيًا حسب اسم المرحلة (بند: ربط تسلسل المراحل بالصفوف) */
+const STAGE_GRADE_TEMPLATES = [
+  {match:/حضان|روض|تمهيد/, grades:['تمهيدي أول','تمهيدي ثاني']},
+  {match:/ابتدائ/, grades:['أولى ابتدائي','تانية ابتدائي','تالتة ابتدائي','رابعة ابتدائي','خامسة ابتدائي','سادسة ابتدائي']},
+  {match:/اعداد|إعداد/, grades:['أولى إعدادي','تانية إعدادي','تالتة إعدادي']},
+  {match:/ثانو/, grades:['أولى ثانوي','تانية ثانوي','تالتة ثانوي']},
+];
+Stages.autoFillGrades = async function(stageId){
+  const st = byId(DB.stages, stageId);
+  if(!st) return;
+  const tpl = STAGE_GRADE_TEMPLATES.find(t=>t.match.test(st.name));
+  if(!tpl){ toast('مفيش قالب صفوف جاهز لاسم المرحلة ده — أضف الصفوف يدويًا من "+ إضافة صف دراسي"'); return; }
+  const existingNames = gradesOfStage(stageId).map(g=>g.name);
+  const toAdd = tpl.grades.filter(g=>!existingNames.includes(g));
+  if(!toAdd.length){ toast('كل الصفوف الافتراضية لهذه المرحلة مضافة بالفعل'); return; }
+  if(!confirm(`هيتم إضافة ${toAdd.length} صف دراسي تلقائيًا:\n${toAdd.join('، ')}\nمتابعة؟`)) return;
+  try{
+    const batch = writeBatch(dbFire);
+    toAdd.forEach((name,i)=>{
+      const ref = doc(collection(dbFire,'grades'));
+      batch.set(ref, {name, stageId, churchId:CURRENT_CHURCH_ID, order: existingNames.length+i});
+    });
+    await batch.commit();
+    await log('توليد صفوف تلقائي', st.name);
+    App.navigate('stages'); toast('تم توليد الصفوف بنجاح');
+  }catch(e){ console.error(e); toast('تعذر التوليد: '+e.message); }
+};
 
 /* ---------- Attendance ---------- */
 Views.attendance = function(){
   const stageOpts = selectOptions(DB.stages,'', 'كل المراحل');
   $content().innerHTML = `
     <div class="section-head"><h2>تسجيل الحضور والغياب</h2></div>
+    <div class="card card-pad no-print" style="margin-bottom:16px; display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;">
+      <div class="field" style="margin:0; flex:1; min-width:220px;"><label>تسجيل حضور سريع بالكود / الباركود</label>
+        <input id="att-scan-input" placeholder="امسح الكود أو اكتبه واضغط Enter" onkeydown="if(event.key==='Enter'){Attendance.scanCode(this.value); this.value='';}">
+      </div>
+      <button type="button" class="btn btn-gold btn-sm" onclick="Scanner.open(v=>{const inp=document.getElementById('att-scan-input'); if(inp) inp.value=v; Attendance.scanCode(v);})">📷 قراءة بالكاميرا</button>
+    </div>
     <div class="card card-pad no-print" style="margin-bottom:16px;">
       <div class="toolbar">
         <div class="field" style="margin:0;"><label>التاريخ</label><input type="date" id="att-date" value="${todayISO()}" onchange="Attendance.render()"></div>
@@ -1768,6 +1938,30 @@ Attendance.render = function(){
       </tbody></table>
     </div>
   `;
+};
+Attendance.scanCode = async function(code){
+  const val = (code||'').trim();
+  if(!val) return;
+  const member = DB.members.find(m=> (m.code||'').trim()===val);
+  if(!member){ toast('مفيش مخدوم بالكود ده: '+val); return; }
+  if(!member.classId){ toast(member.name+' مش متسجّل في فصل بعد'); return; }
+  const date = document.getElementById('att-date') ? document.getElementById('att-date').value : todayISO();
+  try{
+    const rec = DB.attendance.find(a=>a.date===date && a.memberId===member.id && a.classId===member.classId);
+    if(rec) await fsUpdate('attendance', rec.id, {present:true});
+    else await fsAdd('attendance', {date, classId:member.classId, memberId:member.id, present:true});
+    toast('✅ تم تسجيل حضور: '+member.name);
+    await log('تسجيل حضور بالباركود', member.name);
+    // لو المستخدم واقف على نفس فصل المخدوم، حدّث القائمة الظاهرة على طول
+    const stageSel=document.getElementById('att-stage'), gradeSel=document.getElementById('att-grade'), classSel=document.getElementById('att-class');
+    if(classSel && classSel.value===member.classId){ Attendance.render(); }
+    else if(stageSel && classSel && !classSel.value){
+      // فضّل نساعد المستخدم بعرض فصل المخدوم مباشرة
+      stageSel.value = member.stageId||''; Attendance.onStageChange();
+      gradeSel.value = member.gradeId||''; Attendance.onGradeChange();
+      classSel.value = member.classId||''; Attendance.render();
+    }
+  }catch(e){ console.error(e); toast('تعذر تسجيل الحضور: '+e.message); }
 };
 Attendance.markAll = function(present){
   document.querySelectorAll('#att-rows tr').forEach(tr=>{
@@ -1961,6 +2155,7 @@ Views.reports = function(){
     <div class="info-card-grid no-print">
       ${reportCard('كشف جميع المخدومين','قائمة كاملة ببيانات المخدومين مع المرحلة والفصل والحالة.','Reports.membersList()')}
       ${reportCard('كشف حضور خلال فترة','تقرير حضور وغياب تفصيلي حسب المرحلة/الفصل وفترة زمنية.','Reports.attendanceRange()')}
+      ${reportCard('كشف حضور فردي','تقرير حضور وغياب مخدوم واحد بعينه خلال فترة محددة.','Reports.individualAttendance()')}
       ${reportCard('تقرير الحضور الإجمالي','إجمالي أيام الحضور والغياب ونسبة الحضور لكل مخدوم.','Reports.attendanceTotal()')}
       ${reportCard('الغياب المتكرر','قائمة المخدومين الذين يحتاجون متابعة بسبب الغياب.','Reports.needFollowup()')}
       ${reportCard('تقرير التقييمات','متوسط تقييم كل مخدوم خلال فترة.','Reports.evaluationsReport()')}
@@ -2007,8 +2202,40 @@ Reports.attendanceRange = function(){
     <tbody>${rows.map(a=>`<tr><td>${fmtDate(a.date)}</td><td>${esc(nameOf(DB.members,a.memberId))}</td><td>${esc(nameOf(DB.classes,a.classId))}</td><td>${a.present?'<span class="pill pill-present">حاضر</span>':'<span class="pill pill-absent">غائب</span>'}</td></tr>`).join('')}</tbody></table>
   `, `<input type="date" id="rep-from" value="${from}" onchange="Reports.attendanceRange()"><span class="muted">إلى</span><input type="date" id="rep-to" value="${to}" onchange="Reports.attendanceRange()">`);
 };
-Reports.attendanceTotal = function(){
-  const rows = DB.members.map(m=>{
+Reports.individualAttendance = function(){
+  const memberId = document.getElementById('rep-ind-member')?.value || (DB.members[0]&&DB.members[0].id) || '';
+  const from = document.getElementById('rep-ind-from')?.value || todayISO();
+  const to = document.getElementById('rep-ind-to')?.value || todayISO();
+  const m = byId(DB.members, memberId);
+  const memberOptions = DB.members.map(x=>`<option value="${x.id}" ${x.id===memberId?'selected':''}>${esc(x.name)} (${esc(x.code||'')})</option>`).join('');
+  if(!m){
+    reportShell('كشف حضور فردي', `<p class="muted">لا يوجد مخدومون مسجلون بعد.</p>`,
+      `<select id="rep-ind-member" onchange="Reports.individualAttendance()"><option value="">اختر مخدومًا</option>${memberOptions}</select>`);
+    return;
+  }
+  const rows = DB.attendance.filter(a=>a.memberId===memberId && a.date>=from && a.date<=to).sort((a,b)=>new Date(b.date)-new Date(a.date));
+  const presentCount = rows.filter(r=>r.present).length;
+  const totalCount = rows.length;
+  const pct = totalCount? Math.round(presentCount/totalCount*100) : 0;
+  reportShell(`كشف حضور فردي: ${esc(m.name)} — من ${fmtDate(from)} إلى ${fmtDate(to)}`, `
+    <div class="kv" style="margin-bottom:16px;">
+      <b>الكود</b><span>${esc(m.code||'—')}</span>
+      <b>المرحلة</b><span>${esc(nameOf(DB.stages,m.stageId))}</span>
+      <b>الفصل</b><span>${esc(nameOf(DB.classes,m.classId))}</span>
+      <b>عدد أيام الحضور المسجلة</b><span>${totalCount}</span>
+      <b>حضور</b><span>${presentCount}</span>
+      <b>غياب</b><span>${totalCount-presentCount}</span>
+      <b>نسبة الحضور</b><span>${pct}%</span>
+    </div>
+    <table><thead><tr><th>التاريخ</th><th>الحالة</th></tr></thead>
+    <tbody>${rows.length? rows.map(a=>`<tr><td>${fmtDate(a.date)}</td><td>${a.present?'<span class="pill pill-present">حاضر</span>':'<span class="pill pill-absent">غائب</span>'}</td></tr>`).join('') : `<tr><td colspan="2" class="muted">لا توجد سجلات حضور في هذه الفترة</td></tr>`}</tbody></table>
+  `, `
+    <select id="rep-ind-member" onchange="Reports.individualAttendance()">${memberOptions}</select>
+    <input type="date" id="rep-ind-from" value="${from}" onchange="Reports.individualAttendance()"><span class="muted">إلى</span>
+    <input type="date" id="rep-ind-to" value="${to}" onchange="Reports.individualAttendance()">
+  `);
+};
+Reports.attendanceTotal = function(){  const rows = DB.members.map(m=>{
     const recs = DB.attendance.filter(a=>a.memberId===m.id);
     const present = recs.filter(r=>r.present).length;
     const total = recs.length;
@@ -2068,7 +2295,7 @@ Views.users = function(){
   `;
   const uRows = DB.users;
   document.getElementById('users-table-wrap').innerHTML = uRows.length ? `<table><thead><tr><th>الاسم</th><th>البريد الإلكتروني</th><th>الدور</th><th></th></tr></thead>
-    <tbody>${uRows.map(u=>`<tr><td>${esc(u.name)}</td><td class="muted">${esc(u.email)}</td><td>${ROLE_LABELS[u.role]||u.role}</td>
+    <tbody>${uRows.map(u=>`<tr><td class="name-cell"><span class="avatar">${u.photo?`<img src="${u.photo}">`:initials(u.name)}</span>${esc(u.name)}</td><td class="muted">${esc(u.email)}</td><td>${ROLE_LABELS[u.role]||u.role}</td>
       <td><div class="row-actions"><button class="btn btn-ghost btn-sm" onclick="UsersV.openForm('${u.id}')">تعديل الدور</button>${u.id!==CURRENT_USER.uid?`<button class="btn btn-danger btn-sm" onclick="UsersV.remove('${u.id}')">حذف</button>`:''}</div></td>
     </tr>`).join('')}</tbody></table>` : `<div class="empty-state">لا يوجد مستخدمون بعد</div>`;
 
@@ -2125,10 +2352,12 @@ UsersV.cancelInvite = async function(email){
 UsersV.openForm = function(id){
   const u = byId(DB.users,id);
   if(!u) return;
-  UI.openModal('تعديل دور المستخدم', `
+  UI.openModal('تعديل بيانات المستخدم', `
     <div class="form-grid">
+      ${photoFieldHtml(u.photo)}
       <div class="field"><label>الاسم</label><input id="f-name" value="${esc(u.name||'')}" disabled></div>
       <div class="field"><label>البريد الإلكتروني</label><input value="${esc(u.email||'')}" disabled></div>
+      ${codeFieldHtml('f-code', u.code||'', 'اختياري — كود/باركود تعريفي')}
       <div class="field full"><label>الدور</label><select id="f-role">
         <option value="admin" ${u.role==='admin'?'selected':''}>مدير النظام</option>
         <option value="servant" ${u.role==='servant'?'selected':''}>خادم</option>
@@ -2139,8 +2368,10 @@ UsersV.openForm = function(id){
 };
 UsersV.save = async function(id){
   const role = document.getElementById('f-role').value;
+  const photo = document.getElementById('f-photo-data').value;
+  const code = document.getElementById('f-code').value.trim();
   try{
-    await fsUpdate('users', id, {role});
+    await fsUpdate('users', id, {role, photo, code});
     await log('تعديل دور مستخدم', byId(DB.users,id)?.name||'');
     UI.closeModal(); toast('تم الحفظ بنجاح'); App.navigate('users');
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
@@ -2278,7 +2509,9 @@ Views.billing = function(){
       <div class="info-card-grid" style="margin-bottom:20px;">
         ${methods.map(m=>`<div class="card card-pad">
           <h3 style="font-size:14.5px; margin:0 0 6px;">${esc(m.name)}</h3>
-          <div style="font-size:17px; font-weight:800; color:var(--navy); font-family:'Markazi Text',serif;">${esc(m.details)}</div>
+          <div style="font-size:16px; font-weight:800; color:var(--navy); font-family:'Markazi Text',serif; line-height:1.7;">
+            ${(m.accounts&&m.accounts.length? m.accounts : splitAccounts(m.details)).map(a=>linkifyText(a)).join('<br>')}
+          </div>
           ${m.instructions? `<p class="muted" style="margin-top:8px;">${esc(m.instructions)}</p>`:''}
           ${m.qrImage? `<img src="${m.qrImage}" style="max-width:140px; max-height:140px; border-radius:8px; border:1px solid var(--line); margin-top:10px; cursor:pointer;" onclick="UI.previewImage('${m.qrImage.replace(/'/g,"\\'")}')">` : ''}
           <div class="attachment-grid" id="billing-att-${m.id}" style="margin-top:10px;"></div>
@@ -2289,6 +2522,12 @@ Views.billing = function(){
     ${canSubmit ? `
       <div class="section-head"><h2>إرسال إثبات دفع</h2></div>
       <div class="card card-pad" style="max-width:520px; margin-bottom:24px;">
+        <div class="field"><label>حوّلت عن طريق</label>
+          <select id="proof-method">${methods.map(m=>`<option value="${m.id}">${esc(m.name)}</option>`).join('')}</select>
+        </div>
+        <div class="field"><label>حوّلت من (رقمك أو اسم حسابك اللي حوّلت منه)</label>
+          <input id="proof-sender" placeholder="مثال: 010xxxxxxxx أو اسمك على إنستاباي">
+        </div>
         <div class="field"><label>صورة إثبات التحويل</label><input type="file" id="proof-file" accept="image/*"></div>
         <div class="field"><label>ملاحظة (اختياري)</label><textarea id="proof-note" rows="2" placeholder="مثال: حوّلت 200 جنيه فودافون كاش"></textarea></div>
         <button class="btn btn-gold" id="proof-submit-btn" onclick="Billing.submitProof()">إرسال للمراجعة</button>
@@ -2296,10 +2535,11 @@ Views.billing = function(){
     ` : ''}
 
     <div class="section-head"><h2>سجل طلبات الدفع</h2></div>
-    <div class="card">${proofs.length ? `<table><thead><tr><th>التاريخ</th><th>الملاحظة</th><th>الحالة</th></tr></thead>
+    <div class="card">${proofs.length ? `<table><thead><tr><th>التاريخ</th><th>حوّلت عن طريق</th><th>حوّلت من</th><th>الحالة</th></tr></thead>
       <tbody>${proofs.map(p=>`<tr>
         <td>${p.createdAt? fmtDate(new Date(p.createdAt).toISOString()) : '—'}</td>
-        <td class="muted">${esc(p.note||'—')}</td>
+        <td class="muted">${esc(p.methodName||'—')}</td>
+        <td class="muted">${esc(p.senderAccount||'—')}</td>
         <td>${p.status==='approved'?'<span class="pill pill-active">تم القبول</span>':p.status==='rejected'?'<span class="pill pill-inactive">مرفوض</span>':'<span class="church-status status-pending">قيد المراجعة</span>'}</td>
       </tr>`).join('')}</tbody></table>` : `<div class="empty-state">لا توجد طلبات دفع سابقة</div>`}</div>
   `;
@@ -2323,19 +2563,24 @@ Billing.loadMethodAttachments = async function(methodId){
 Billing.submitProof = async function(){
   const fileInput = document.getElementById('proof-file');
   const note = document.getElementById('proof-note').value.trim();
+  const senderAccount = document.getElementById('proof-sender').value.trim();
+  const methodSel = document.getElementById('proof-method');
+  const methodName = methodSel && methodSel.selectedOptions[0] ? methodSel.selectedOptions[0].textContent : '';
   const btn = document.getElementById('proof-submit-btn');
   const file = fileInput.files[0];
+  if(!senderAccount){ toast('من فضلك اكتب رقمك أو اسم حسابك اللي حوّلت منه، عشان الإدارة تقدر تتأكد من التحويل'); return; }
   if(!file){ toast('اختر صورة إثبات التحويل أولًا'); return; }
   btn.disabled = true; btn.textContent = 'جاري الرفع...';
   try{
     const imageBase64 = await compressImage(file, 900, 0.6);
     await fsAddRaw('paymentProofs', {
       churchId: CURRENT_CHURCH_ID, churchName: CURRENT_CHURCH?CURRENT_CHURCH.name:'',
+      methodId: methodSel?methodSel.value:'', methodName, senderAccount,
       note, imageBase64, status:'pending', createdAt: Date.now(),
     });
     await log('إرسال إثبات دفع', note);
     toast('تم إرسال إثبات الدفع، وهيتم مراجعته من الإدارة قريبًا');
-    fileInput.value=''; document.getElementById('proof-note').value='';
+    fileInput.value=''; document.getElementById('proof-note').value=''; document.getElementById('proof-sender').value='';
   }catch(e){ console.error(e); toast('تعذر رفع الصورة: '+e.message); }
   finally{ btn.disabled=false; btn.textContent='إرسال للمراجعة'; }
 };
