@@ -71,7 +71,7 @@ async function handlePhotoSelect(){
   const file = document.getElementById('f-photo-file').files[0];
   if(!file) return;
   try{
-    const img = await compressImage(file, 400, 0.75);
+    const img = await smartImageUpload(file, 400, 0.75);
     document.getElementById('f-photo-data').value = img;
     document.getElementById('f-photo-preview').innerHTML = `<img src="${img}" style="width:100%; height:100%; object-fit:cover;">`;
   }catch(e){ console.error(e); toast('تعذر معالجة الصورة'); }
@@ -139,6 +139,64 @@ Scanner.close = function(){
   UI.closeModal();
 };
 window.Scanner = Scanner;
+/* ---- أداة اختيار مخدوم واحد: بحث بالاسم/الكود + فلترة مرحلة/صف/فصل + قراءة باركود ---- */
+function memberPickerHtml(fieldId, selectedId){
+  const sel = selectedId ? byId(DB.members, selectedId) : null;
+  return `
+  <div class="field full">
+    <label>المخدوم</label>
+    <div class="toolbar" style="margin-bottom:6px;">
+      <select id="${fieldId}-stage" onchange="mpOnStageChange('${fieldId}')" style="min-width:120px;">${selectOptions(DB.stages,'','كل المراحل')}</select>
+      <select id="${fieldId}-grade" onchange="mpOnGradeChange('${fieldId}')" style="min-width:120px;"><option value="">كل الصفوف</option></select>
+      <select id="${fieldId}-class" onchange="mpRenderResults('${fieldId}')" style="min-width:110px;"><option value="">كل الفصول</option></select>
+      <input id="${fieldId}-search" placeholder="بحث بالاسم أو الكود..." oninput="mpRenderResults('${fieldId}')" style="flex:1; min-width:140px;">
+      <button type="button" class="btn btn-ghost btn-sm" onclick="Scanner.open(v=>mpSelectByCode('${fieldId}', v))">📷</button>
+    </div>
+    <input type="hidden" id="${fieldId}" value="${selectedId||''}">
+    <div id="${fieldId}-selected" class="muted" style="margin-bottom:6px;">${sel? '✅ المختار: '+esc(sel.name) : 'اكتب اسم/كود أو اختار مرحلة للبحث'}</div>
+    <div id="${fieldId}-results" style="max-height:170px; overflow:auto; border:1px solid var(--line); border-radius:8px;"></div>
+  </div>`;
+}
+function mpOnStageChange(fieldId){
+  const stageId = document.getElementById(fieldId+'-stage').value;
+  const gradeSel = document.getElementById(fieldId+'-grade');
+  gradeSel.innerHTML = '<option value="">كل الصفوف</option>' + selectOptions(gradesOfStage(stageId),'');
+  document.getElementById(fieldId+'-class').innerHTML = '<option value="">كل الفصول</option>';
+  mpRenderResults(fieldId);
+}
+function mpOnGradeChange(fieldId){
+  const gradeId = document.getElementById(fieldId+'-grade').value;
+  document.getElementById(fieldId+'-class').innerHTML = '<option value="">كل الفصول</option>' + selectOptions(classesOfGrade(gradeId),'');
+  mpRenderResults(fieldId);
+}
+function mpRenderResults(fieldId){
+  const box = document.getElementById(fieldId+'-results');
+  const q = document.getElementById(fieldId+'-search').value.trim().toLowerCase();
+  const stageId = document.getElementById(fieldId+'-stage').value;
+  const gradeId = document.getElementById(fieldId+'-grade').value;
+  const classId = document.getElementById(fieldId+'-class').value;
+  let list = DB.members;
+  if(stageId) list = list.filter(m=>m.stageId===stageId);
+  if(gradeId) list = list.filter(m=>m.gradeId===gradeId);
+  if(classId) list = list.filter(m=>m.classId===classId);
+  if(q) list = list.filter(m=> m.name.toLowerCase().includes(q) || (m.code||'').toLowerCase().includes(q));
+  if(!q && !stageId && !gradeId && !classId){ box.innerHTML=''; return; }
+  list = list.slice(0,25);
+  box.innerHTML = list.length ? list.map(m=>`<div class="status-dd-item" onclick="mpSelect('${fieldId}','${m.id}')">${esc(m.name)} <small class="muted">${esc(m.code||'')}</small></div>`).join('')
+    : `<div class="muted" style="padding:8px;">لا نتائج مطابقة</div>`;
+}
+function mpSelect(fieldId, memberId){
+  const m = byId(DB.members, memberId);
+  document.getElementById(fieldId).value = memberId;
+  document.getElementById(fieldId+'-selected').innerHTML = '✅ المختار: '+esc(m?m.name:'');
+  document.getElementById(fieldId+'-results').innerHTML = '';
+  document.getElementById(fieldId+'-search').value = '';
+}
+function mpSelectByCode(fieldId, code){
+  const m = DB.members.find(x=>(x.code||'').trim()===code.trim());
+  if(!m){ toast('مفيش مخدوم بالكود ده: '+code); return; }
+  mpSelect(fieldId, m.id);
+}
 function codeFieldHtml(id, value, placeholder){
   return `<div class="field"><label>الكود / الباركود</label>
     <div style="display:flex; gap:6px;">
@@ -290,6 +348,14 @@ async function deleteChatMessage(id){
   catch(e){ console.error(e); toast('تعذر حذف الرسالة: '+e.message); }
 }
 window.deleteChatMessage = deleteChatMessage;
+/* إغلاق كاميرا الباركود تلقائيًا فى أي سيناريو تاني ممكن ينسى فيه المستخدم الكاميرا شغالة */
+function stopScannerIfActive(){
+  if(window.Scanner && Scanner._stream){ Scanner._stream.getTracks().forEach(t=>t.stop()); Scanner._stream=null; }
+  if(window.Scanner && Scanner._raf){ cancelAnimationFrame(Scanner._raf); Scanner._raf=null; }
+}
+document.addEventListener('visibilitychange', ()=>{ if(document.hidden) stopScannerIfActive(); });
+window.addEventListener('pagehide', stopScannerIfActive);
+window.addEventListener('beforeunload', stopScannerIfActive);
 async function markChatRead(items, field, col='chatMessages'){  const unread = (items||[]).filter(m=> m[field]===false);
   if(!unread.length) return;
   try{
@@ -676,6 +742,8 @@ let SA_ACTIVITY_FILTERS = {from:'', to:''};
 let SA_REPORT_FILTERS = {from:'', to:'', category:''};
 let SA_PLANS = [];
 let SA_DISCOUNT_CODES = [];
+let SA_CHURCH_STATUS_FILTER = '';
+const CHURCH_STATUS_ICONS = {pending:'🆕', trial:'🔄', active:'✅', expired:'⏰', rejected:'🚫', exempt:'🎁'};
 let SA_SUBADMINS = [];
 let SA_SUBADMIN_INVITES = [];
 let SA_PAGE = 'churches';
@@ -790,6 +858,7 @@ SuperAdmin.boot = function(){
 };
 const SA_PAGE_TITLES = {churches:'الكنايس', requests:'طلبات جديدة', methods:'طرق الدفع', plans:'الخطط والعروض', payments:'مراجعة المدفوعات', chats:'الدردشات', tickets:'التذاكر', links:'المظهر والروابط', activity:'سجل النشاط', report:'تقرير شامل', subadmins:'الأدمن الفرعي'};
 SuperAdmin.navigate = function(page){
+  stopScannerIfActive();
   SA_PAGE = page;
   UI.closeSaSidebar();
   document.querySelectorAll('#sa-nav a').forEach(a=>a.classList.toggle('active', a.dataset.page===page));
@@ -834,9 +903,30 @@ SuperAdmin.render = function(){
       : `<p class="muted">لا توجد طلبات جديدة حاليًا.</p>`;
     return;
   }
-  el.innerHTML = SA_CHURCHES.length ? SA_CHURCHES.map(c=>SuperAdmin.churchCard(c)).join('')
-    : `<p class="muted">لا توجد كنايس مسجلة بعد.</p>`;
+  const filtered = SA_CHURCH_STATUS_FILTER ? SA_CHURCHES.filter(c=>c.status===SA_CHURCH_STATUS_FILTER) : SA_CHURCHES;
+  const filterBarHtml = `
+    <div class="status-dd no-print" style="grid-column:1/-1; margin-bottom:6px;">
+      <button type="button" class="status-dd-btn" onclick="SuperAdmin.toggleStatusDD(event)">
+        ${SA_CHURCH_STATUS_FILTER? `${CHURCH_STATUS_ICONS[SA_CHURCH_STATUS_FILTER]} ${CHURCH_STATUS_LABELS[SA_CHURCH_STATUS_FILTER]}` : '📋 الحالة: الكل'} ▾
+      </button>
+      <div class="status-dd-panel" id="sa-status-dd-panel">
+        <div class="status-dd-item ${!SA_CHURCH_STATUS_FILTER?'active':''}" onclick="SuperAdmin.setChurchStatusFilter('')">📋 الكل</div>
+        ${Object.entries(CHURCH_STATUS_LABELS).map(([k,v])=>`<div class="status-dd-item ${SA_CHURCH_STATUS_FILTER===k?'active':''}" onclick="SuperAdmin.setChurchStatusFilter('${k}')">${CHURCH_STATUS_ICONS[k]} ${v}</div>`).join('')}
+      </div>
+    </div>
+  `;
+  el.innerHTML = filterBarHtml + (filtered.length ? filtered.map(c=>SuperAdmin.churchCard(c)).join('')
+    : `<p class="muted">لا توجد كنايس مطابقة لهذا الفلتر.</p>`);
 };
+SuperAdmin.toggleStatusDD = function(e){
+  e.stopPropagation();
+  document.getElementById('sa-status-dd-panel').classList.toggle('open');
+};
+SuperAdmin.setChurchStatusFilter = function(val){
+  SA_CHURCH_STATUS_FILTER = val;
+  SuperAdmin.render();
+};
+document.addEventListener('click', ()=>{ document.querySelectorAll('.status-dd-panel.open').forEach(p=>p.classList.remove('open')); });
 
 SuperAdmin.churchCard = function(c){
   const info = churchStatusInfo(c);
@@ -1048,7 +1138,7 @@ SuperAdmin.saveMethod = async function(id){
   const data = { name, accounts, details: accounts.join(', '), instructions: document.getElementById('f-instructions').value.trim(), active: document.getElementById('f-active').checked };
   const qrFile = document.getElementById('f-qr').files[0];
   try{
-    if(qrFile) data.qrImage = await compressImage(qrFile, 500, 0.7);
+    if(qrFile) data.qrImage = await smartImageUpload(qrFile, 500, 0.7);
     if(id) await updateDoc(doc(dbFire,'paymentMethods',id), data);
     else await addDoc(collection(dbFire,'paymentMethods'), data);
     UI.closeModal(); toast('تم الحفظ بنجاح');
@@ -1104,7 +1194,7 @@ SuperAdmin.addAttachment = async function(methodId){
   if(!file){ errEl.textContent = 'اختر صورة المرفق أولًا'; return; }
   if(!label){ errEl.textContent = 'اكتب توضيح للمرفق (زي رقم المحفظة) عشان الكنايس متتلخبطش'; return; }
   try{
-    const img = await compressImage(file, 700, 0.7);
+    const img = await smartImageUpload(file, 700, 0.7);
     await addDoc(collection(dbFire,'paymentMethods',methodId,'attachments'), { label, img, createdAt: Date.now() });
     labelInput.value = ''; fileInput.value = '';
     await SuperAdmin.renderAttachmentsList(methodId);
@@ -1282,7 +1372,7 @@ SuperAdmin.sendChat = async function(){
   input.value='';
   try{
     const payload = { churchId: SA_CHAT_CHURCH_ID, senderRole:'superadmin', senderName: CURRENT_USER.name, text, createdAt: Date.now(), readBySA:true, readByChurch:false };
-    if(file) payload.imageBase64 = await compressImage(file, 900, 0.6);
+    if(file) payload.imageBase64 = await smartImageUpload(file, 900, 0.6);
     await addDoc(collection(dbFire,'chatMessages'), payload);
     SuperAdmin.clearChatFile();
   }catch(e){ console.error(e); toast('تعذر إرسال الرسالة: '+e.message); }
@@ -1435,7 +1525,18 @@ SuperAdmin.saveTicketUpdate = async function(id){
 /* ---- الروابط: تواصل معنا العام (لأي زائر) + روابط إدارية سريعة (خاصة بالمالك) ---- */
 SuperAdmin.renderLinks = function(el){
   const currentTheme = SA_PUBLIC_CONFIG.theme || 'classic';
+  const ann = SA_PUBLIC_CONFIG.announcement || {};
   el.innerHTML = `
+    <div class="card card-pad" style="margin-bottom:16px;">
+      <b style="font-size:13px; display:block; margin-bottom:8px;">📢 شريط إعلان/تنويه متحرك (يظهر لكل الزوار والكنايس أعلى الصفحة)</b>
+      <label style="display:flex; align-items:center; gap:8px; font-weight:400; font-size:13px; margin-bottom:10px;">
+        <input type="checkbox" id="ann-enabled" ${ann.enabled?'checked':''}> تفعيل الشريط
+      </label>
+      <div class="field"><label>نص الإعلان</label><input id="ann-text" value="${esc(ann.text||'')}" placeholder="مثال: تم إضافة ميزة التذاكر الجديدة، جرّبها الآن!"></div>
+      <button class="btn btn-primary btn-sm" onclick="SuperAdmin.saveAnnouncement()">حفظ الإعلان</button>
+      <p class="muted" style="margin-top:6px;">أي حد يقدر يقفله مؤقتًا لنفسه بـ×، وهيرجع يظهر تاني لما يفتح الصفحة من جديد طالما لسه مفعّل.</p>
+    </div>
+
     <div class="card card-pad" style="margin-bottom:16px;">
       <b style="font-size:13px; display:block; margin-bottom:8px;">🎨 مظهر النظام (يظهر لكل الكنايس دفعة واحدة)</b>
       <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(130px,1fr)); gap:10px;">
@@ -1451,12 +1552,15 @@ SuperAdmin.renderLinks = function(el){
     </div>
 
     <div class="card card-pad" style="margin-bottom:16px;">
-      <b style="font-size:13px; display:block; margin-bottom:8px;">💬 رابط تواصل معنا (يظهر لأي زائر في صفحة الدخول، حتى قبل ما يسجّل)</b>
-      <div style="display:flex; gap:8px;">
-        <input id="pc-contact-link" value="${esc(SA_PUBLIC_CONFIG.contactLink||'')}" placeholder="مثال: https://wa.me/2010xxxxxxxx" style="flex:1;">
-        <button class="btn btn-primary btn-sm" onclick="SuperAdmin.savePublicContact()">حفظ</button>
+      <b style="font-size:13px; display:block; margin-bottom:8px;">📞 تواصل معنا (يظهر لأي زائر في صفحة الدخول قبل ما يسجّل)</b>
+      <div class="form-grid">
+        <div class="field"><label>واتساب (رابط wa.me كامل)</label><input id="pc-whatsapp" value="${esc(SA_PUBLIC_CONFIG.contacts?.whatsapp||'')}" placeholder="https://wa.me/2010xxxxxxxx"></div>
+        <div class="field"><label>فيسبوك</label><input id="pc-facebook" value="${esc(SA_PUBLIC_CONFIG.contacts?.facebook||'')}" placeholder="https://facebook.com/..."></div>
+        <div class="field"><label>تليجرام</label><input id="pc-telegram" value="${esc(SA_PUBLIC_CONFIG.contacts?.telegram||'')}" placeholder="https://t.me/..."></div>
+        <div class="field"><label>البريد الإلكتروني</label><input id="pc-email" value="${esc(SA_PUBLIC_CONFIG.contacts?.email||'')}" placeholder="support@example.com"></div>
+        <div class="field"><label>رقم الاتصال المباشر</label><input id="pc-phone" value="${esc(SA_PUBLIC_CONFIG.contacts?.phone||'')}" placeholder="0100xxxxxxx"></div>
       </div>
-      <p class="muted" style="margin-top:6px;">تقدر تحط لينك واتساب أو إيميل (mailto:) أو أي رابط تواصل تانى.</p>
+      <button class="btn btn-primary btn-sm" onclick="SuperAdmin.savePublicContact()">حفظ قنوات التواصل</button>
     </div>
 
     <div class="card card-pad" style="margin-bottom:16px;">
@@ -1471,10 +1575,15 @@ SuperAdmin.renderLinks = function(el){
     <div class="card" style="padding:0;">
       ${SA_ADMIN_LINKS.length ? SA_ADMIN_LINKS.map(l=>`
         <div style="padding:12px 16px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
-          <div><b style="font-size:13px;">${esc(l.name)}</b><div class="muted" style="font-size:11.5px; word-break:break-all;">${esc(l.url)}</div></div>
+          <div>
+            <b style="font-size:13px;">${esc(l.name)}</b>
+            ${l.isDeleteAccountsLink? `<span class="pill status-trial" style="margin-right:6px;">⭐ رابط حذف الحسابات</span>`:''}
+            <div class="muted" style="font-size:11.5px; word-break:break-all;">${esc(l.url)}</div>
+          </div>
           <div class="row-actions">
             <a class="btn btn-ghost btn-sm" href="${esc(l.url)}" target="_blank" rel="noopener">فتح</a>
             <button class="btn btn-ghost btn-sm" onclick="SuperAdmin.editAdminLink('${l.id}')">تعديل</button>
+            <button class="btn btn-ghost btn-sm" title="تحديد كرابط حذف الحسابات" onclick="SuperAdmin.markDeleteAccountsLink('${l.id}')">⭐ ${l.isDeleteAccountsLink?'إلغاء التحديد':'تحديد'}</button>
             <button class="btn btn-danger btn-sm" onclick="SuperAdmin.removeAdminLink('${l.id}')">حذف</button>
           </div>
         </div>
@@ -1482,12 +1591,27 @@ SuperAdmin.renderLinks = function(el){
     </div>
   `;
 };
+SuperAdmin.saveAnnouncement = async function(){
+  const enabled = document.getElementById('ann-enabled').checked;
+  const text = document.getElementById('ann-text').value.trim();
+  try{
+    await setDoc(doc(dbFire,'platformConfig','public'), { announcement: {enabled, text} }, {merge:true});
+    toast('تم الحفظ');
+  }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
+};
 SuperAdmin.saveTheme = async function(key){
   try{ await setDoc(doc(dbFire,'platformConfig','public'), { theme: key }, {merge:true}); applyTheme(key); toast('تم تطبيق المظهر الجديد لكل الزوار'); }
   catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
 };
-SuperAdmin.savePublicContact = async function(){  const val = document.getElementById('pc-contact-link').value.trim();
-  try{ await setDoc(doc(dbFire,'platformConfig','public'), { contactLink: val }, {merge:true}); toast('تم الحفظ'); }
+SuperAdmin.savePublicContact = async function(){
+  const contacts = {
+    whatsapp: document.getElementById('pc-whatsapp').value.trim(),
+    facebook: document.getElementById('pc-facebook').value.trim(),
+    telegram: document.getElementById('pc-telegram').value.trim(),
+    email: document.getElementById('pc-email').value.trim(),
+    phone: document.getElementById('pc-phone').value.trim(),
+  };
+  try{ await setDoc(doc(dbFire,'platformConfig','public'), { contacts }, {merge:true}); toast('تم الحفظ'); }
   catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
 };
 SuperAdmin.addAdminLink = async function(){
@@ -1508,6 +1632,16 @@ SuperAdmin.editAdminLink = async function(id){
   if(url===null) return;
   try{ await updateDoc(doc(dbFire,'adminLinks',id), {name:name.trim(), url:url.trim()}); }
   catch(e){ console.error(e); toast('تعذر التعديل: '+e.message); }
+};
+SuperAdmin.markDeleteAccountsLink = async function(id){
+  try{
+    const batch = writeBatch(dbFire);
+    SA_ADMIN_LINKS.forEach(l=>{
+      const shouldBe = l.id===id ? !l.isDeleteAccountsLink : false;
+      if(!!l.isDeleteAccountsLink !== shouldBe) batch.update(doc(dbFire,'adminLinks',l.id), {isDeleteAccountsLink: shouldBe});
+    });
+    await batch.commit();
+  }catch(e){ console.error(e); toast('تعذر التحديث: '+e.message); }
 };
 SuperAdmin.removeAdminLink = async function(id){
   if(!confirm('حذف هذا الرابط؟')) return;
@@ -1784,21 +1918,21 @@ window.SuperAdmin = SuperAdmin;
 
 /* ---------------- Nav ---------------- */
 const NAV_ITEMS = [
-  {id:'dashboard', label:'لوحة التحكم', ic:'▦'},
-  {id:'members', label:'المخدومون', ic:'◈'},
-  {id:'servants', label:'الخدام', ic:'✦'},
-  {id:'stages', label:'المراحل والفصول', ic:'▤'},
-  {id:'attendance', label:'الحضور والغياب', ic:'✓'},
-  {id:'evaluations', label:'التقييمات', ic:'★'},
-  {id:'followups', label:'المتابعة', ic:'✎'},
-  {id:'activities', label:'الأنشطة', ic:'❖'},
-  {id:'reports', label:'التقارير', ic:'▥'},
+  {id:'dashboard', label:'لوحة التحكم', ic:'🏠'},
+  {id:'members', label:'المخدومون', ic:'📚'},
+  {id:'servants', label:'الخدام', ic:'🧑\u200d🤝\u200d🧑'},
+  {id:'stages', label:'المراحل والفصول', ic:'🏫'},
+  {id:'attendance', label:'الحضور والغياب', ic:'📅'},
+  {id:'evaluations', label:'التقييمات', ic:'⭐'},
+  {id:'followups', label:'المتابعة', ic:'📝'},
+  {id:'activities', label:'الأنشطة', ic:'🎉'},
+  {id:'reports', label:'التقارير', ic:'📊'},
   {id:'billing', label:'الاشتراك والدفع', ic:'💳'},
   {id:'chat', label:'الدردشة مع الإدارة', ic:'💬', adminOnly:true, badge:true},
-  {id:'tickets', label:'الدعم الفني والشكاوى', ic:'🎫', badge:true},
-  {id:'users', label:'المستخدمون والصلاحيات', ic:'⚿', adminOnly:true},
-  {id:'settings', label:'الإعدادات', ic:'⚙', adminOnly:true},
-  {id:'backup', label:'النسخ الاحتياطي', ic:'⟲', adminOnly:true},
+  {id:'tickets', label:'الدعم الفني والشكاوى', ic:'🎫', adminOnly:true, badge:true},
+  {id:'users', label:'المستخدمون والصلاحيات', ic:'👥', adminOnly:true},
+  {id:'settings', label:'الإعدادات', ic:'⚙️', adminOnly:true},
+  {id:'backup', label:'النسخ الاحتياطي', ic:'💾', adminOnly:true},
 ];
 let IMPERSONATING = false; // true لما المالك يدخل مؤقتًا للوحة كنيسة معينة
 function buildNav(){
@@ -1815,6 +1949,7 @@ App.updateNavBadge = function(id, count){
   el.style.display = count>0 ? 'inline-block' : 'none';
 };
 App.navigate = function(page, param){
+  stopScannerIfActive();
   CURRENT_PAGE = page; CURRENT_PARAM = param;
   UI.closeSidebar();
   document.querySelectorAll('#nav a').forEach(a=>a.classList.toggle('active', a.dataset.page===page));
@@ -1838,7 +1973,12 @@ UI.openModal = function(title, bodyHtml, footHtml){
   document.getElementById('modal-foot').innerHTML = footHtml || '';
   document.getElementById('modal-backdrop').classList.add('open');
 };
-UI.closeModal = function(){ document.getElementById('modal-backdrop').classList.remove('open'); };
+UI.closeModal = function(){
+  document.getElementById('modal-backdrop').classList.remove('open');
+  // إغلاق كاميرا الباركود تلقائيًا لو كانت شغالة، لتجنب استهلاك البطارية/سخونة الجهاز فى الخلفية
+  if(window.Scanner && Scanner._stream){ Scanner._stream.getTracks().forEach(t=>t.stop()); Scanner._stream=null; }
+  if(window.Scanner && Scanner._raf){ cancelAnimationFrame(Scanner._raf); Scanner._raf=null; }
+};
 /* معاينة صورة مكبّرة داخل مودال (تُستخدم لمرفقات طرق الدفع وإثباتات الدفع) */
 UI.previewImage = function(src){
   UI.openModal('معاينة الصورة', `<div style="text-align:center;"><img src="${src}" style="max-width:100%; border-radius:10px; border:1px solid var(--line);"></div>`, `<button class="btn btn-ghost btn-block" onclick="UI.closeModal()">إغلاق</button>`);
@@ -2542,7 +2682,7 @@ Evaluations.openForm = function(id, memberId){
   const e = id ? byId(DB.evaluations,id) : {scores:{}};
   UI.openModal(id?'تعديل تقييم':'تقييم جديد', `
     <div class="form-grid">
-      <div class="field"><label>المخدوم</label><select id="f-member" ${memberId?'disabled':''}>${selectOptions(DB.members, memberId||e.memberId)}</select></div>
+      ${memberId? `<div class="field"><label>المخدوم</label><input value="${esc(nameOf(DB.members,memberId))}" disabled></div>` : memberPickerHtml('f-member', e.memberId)}
       <div class="field"><label>التاريخ</label><input type="date" id="f-date" value="${e.date||todayISO()}"></div>
     </div>
     ${Object.entries(EVAL_GROUPS).map(([g,keys])=>`
@@ -2591,13 +2731,14 @@ Views.followups = function(){
 };
 Followups.openForm = function(id, memberId){
   const f = id ? byId(DB.followups,id) : {};
+  const followupTypeOptions = [...new Set(['غياب','سلوكي','روحي','دراسي','أسري','أخرى', ...(DB.settings.followupTypes||[])])];
   UI.openModal(id?'تعديل متابعة':'متابعة جديدة', `
     <div class="form-grid">
-      <div class="field"><label>المخدوم</label><select id="f-member" ${memberId?'disabled':''}>${selectOptions(DB.members, memberId||f.memberId)}</select></div>
+      ${memberId? `<div class="field"><label>المخدوم</label><input value="${esc(nameOf(DB.members,memberId))}" disabled></div>` : memberPickerHtml('f-member', f.memberId)}
       <div class="field"><label>التاريخ</label><input type="date" id="f-date" value="${f.date||todayISO()}"></div>
       <div class="field"><label>الخادم المسؤول</label><select id="f-servant">${selectOptions(DB.servants,f.servantId)}</select></div>
       <div class="field"><label>نوع المتابعة</label><select id="f-type">
-        ${['غياب','سلوكي','روحي','دراسي','أسري','أخرى'].map(t=>`<option ${f.type===t?'selected':''}>${t}</option>`).join('')}
+        ${followupTypeOptions.map(t=>`<option ${f.type===t?'selected':''}>${esc(t)}</option>`).join('')}
       </select></div>
       <div class="field full"><label>موضوع المتابعة</label><input id="f-subject" value="${esc(f.subject||'')}"></div>
       <div class="field full"><label>الملاحظات</label><textarea id="f-notes" rows="2">${esc(f.notes||'')}</textarea></div>
@@ -2646,16 +2787,43 @@ Activities.openForm = function(id){
   const a = id?byId(DB.activities,id):{participants:[]};
   UI.openModal(id?'تعديل نشاط':'إضافة نشاط', `
     <div class="form-grid">
-      <div class="field"><label>اسم النشاط</label><input id="f-name" value="${esc(a.name||'')}"></div>
+      <div class="field"><label>اسم النشاط</label>
+        <input id="f-name" list="activity-names-dl" value="${esc(a.name||'')}" placeholder="اكتب اسم النشاط أو اختر من المقترحات">
+        <datalist id="activity-names-dl">${(DB.settings.activityNames||[]).map(v=>`<option value="${esc(v)}">`).join('')}</datalist>
+      </div>
       <div class="field"><label>التاريخ</label><input type="date" id="f-date" value="${a.date||todayISO()}"></div>
       <div class="field"><label>المكان</label><input id="f-place" value="${esc(a.place||'')}"></div>
-      <div class="field"><label>المسؤول</label><input id="f-resp" value="${esc(a.responsible||'')}"></div>
+      <div class="field"><label>المسؤول</label><select id="f-resp">
+        <option value="">اختر خادمًا مسؤولًا</option>
+        ${DB.servants.map(s=>`<option value="${esc(s.name)}" ${a.responsible===s.name?'selected':''}>${esc(s.name)}</option>`).join('')}
+      </select></div>
       <div class="field full"><label>ملاحظات</label><textarea id="f-notes" rows="2">${esc(a.notes||'')}</textarea></div>
       <div class="field full"><label>المشاركون</label>
-        <div class="checklist">${DB.members.map(m=>`<label><input type="checkbox" value="${m.id}" ${(a.participants||[]).includes(m.id)?'checked':''} class="f-part"> ${esc(m.name)}</label>`).join('')}</div>
+        <div class="toolbar" style="margin-bottom:8px;">
+          <select id="pt-stage" onchange="Activities.filterParticipants()" style="min-width:120px;">${selectOptions(DB.stages,'','كل المراحل')}</select>
+          <input id="pt-search" placeholder="بحث بالاسم أو الكود..." oninput="Activities.filterParticipants()" style="flex:1; min-width:140px;">
+          <button type="button" class="btn btn-ghost btn-sm" onclick="Scanner.open(v=>Activities.checkByCode(v))">📷</button>
+        </div>
+        <div class="checklist" id="participants-checklist">${DB.members.map(m=>`<label data-name="${esc(m.name).toLowerCase()}" data-code="${esc(m.code||'').toLowerCase()}" data-stage="${m.stageId||''}"><input type="checkbox" value="${m.id}" ${(a.participants||[]).includes(m.id)?'checked':''} class="f-part"> ${esc(m.name)}</label>`).join('')}</div>
       </div>
     </div>
   `, `<button class="btn btn-primary" onclick="Activities.save('${id||''}')">حفظ</button><button class="btn btn-ghost" onclick="UI.closeModal()">إلغاء</button>`);
+};
+Activities.filterParticipants = function(){
+  const q = document.getElementById('pt-search').value.trim().toLowerCase();
+  const stageId = document.getElementById('pt-stage').value;
+  document.querySelectorAll('#participants-checklist label').forEach(lb=>{
+    const matchQ = !q || lb.dataset.name.includes(q) || lb.dataset.code.includes(q);
+    const matchStage = !stageId || lb.dataset.stage===stageId;
+    lb.style.display = (matchQ && matchStage) ? '' : 'none';
+  });
+};
+Activities.checkByCode = function(code){
+  const target = Array.from(document.querySelectorAll('#participants-checklist label')).find(lb=>lb.dataset.code===code.trim().toLowerCase());
+  if(!target){ toast('مفيش مخدوم بالكود ده: '+code); return; }
+  target.querySelector('input.f-part').checked = true;
+  target.style.display = '';
+  target.scrollIntoView({block:'center'});
 };
 Activities.save = async function(id){
   const name = document.getElementById('f-name').value.trim(); if(!name) return toast('أدخل اسم النشاط');
@@ -2921,6 +3089,30 @@ Views.settings = function(){
       </div>
       <button class="btn btn-primary" style="margin-top:14px;" onclick="SettingsV.save()">حفظ الإعدادات</button>
     </div>
+
+    <div class="section-head" style="margin-top:26px;"><h2>📋 قوائم المهام (أسماء الأنشطة وأنواع المتابعة)</h2></div>
+    <div class="info-card-grid" style="margin-bottom:10px;">
+      <div class="card card-pad">
+        <b style="font-size:13px; display:block; margin-bottom:8px;">أسماء أنشطة جاهزة (تظهر كاقتراح عند إضافة نشاط)</b>
+        <div style="display:flex; gap:8px; margin-bottom:10px;">
+          <input id="new-activity-type" placeholder="اكتب اسم نشاط جديد..." style="flex:1; padding:8px 10px; border:1px solid var(--line); border-radius:8px;" onkeydown="if(event.key==='Enter'){SettingsV.addListItem('activityNames','new-activity-type');}">
+          <button class="btn btn-primary btn-sm" onclick="SettingsV.addListItem('activityNames','new-activity-type')">+ إضافة</button>
+        </div>
+        <div style="display:flex; flex-wrap:wrap; gap:6px;">
+          ${(s.activityNames||[]).length ? s.activityNames.map(v=>`<span class="pill status-pending" style="display:inline-flex; align-items:center; gap:6px;">${esc(v)} <a style="cursor:pointer; color:var(--absent); font-weight:900;" onclick="SettingsV.removeListItem('activityNames','${esc(v).replace(/'/g,"\\'")}')">✖</a></span>`).join('') : `<span class="muted">لا توجد أسماء مضافة بعد.</span>`}
+        </div>
+      </div>
+      <div class="card card-pad">
+        <b style="font-size:13px; display:block; margin-bottom:8px;">أنواع متابعة جاهزة</b>
+        <div style="display:flex; gap:8px; margin-bottom:10px;">
+          <input id="new-followup-type" placeholder="اكتب نوع متابعة جديد..." style="flex:1; padding:8px 10px; border:1px solid var(--line); border-radius:8px;" onkeydown="if(event.key==='Enter'){SettingsV.addListItem('followupTypes','new-followup-type');}">
+          <button class="btn btn-primary btn-sm" onclick="SettingsV.addListItem('followupTypes','new-followup-type')">+ إضافة</button>
+        </div>
+        <div style="display:flex; flex-wrap:wrap; gap:6px;">
+          ${(s.followupTypes||[]).length ? s.followupTypes.map(v=>`<span class="pill status-pending" style="display:inline-flex; align-items:center; gap:6px;">${esc(v)} <a style="cursor:pointer; color:var(--absent); font-weight:900;" onclick="SettingsV.removeListItem('followupTypes','${esc(v).replace(/'/g,"\\'")}')">✖</a></span>`).join('') : `<span class="muted">لا توجد أنواع مضافة بعد.</span>`}
+        </div>
+      </div>
+    </div>
     <div class="section-head" style="margin-top:26px;"><h2>سجل العمليات</h2></div>
     <div class="card"><table><thead><tr><th>التاريخ</th><th>المستخدم</th><th>العملية</th><th>التفاصيل</th></tr></thead>
     <tbody>${DB.auditLog.slice(0,80).map(l=>`<tr><td>${fmtDate(l.date)}</td><td>${esc(l.user)}</td><td>${esc(l.action)}</td><td class="muted">${esc(l.details)}</td></tr>`).join('')}</tbody></table></div>
@@ -2939,6 +3131,19 @@ SettingsV.save = async function(){
     await log('تعديل الإعدادات','');
     toast('تم حفظ الإعدادات');
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
+};
+SettingsV.addListItem = async function(field, inputId){
+  const input = document.getElementById(inputId);
+  const val = input.value.trim();
+  if(!val) return;
+  const list = DB.settings[field]||[];
+  if(list.includes(val)){ toast('العنصر ده موجود بالفعل'); return; }
+  try{ await fsSet('settings', CURRENT_CHURCH_ID, {[field]: [...list, val]}); input.value=''; }
+  catch(e){ console.error(e); toast('تعذر الإضافة: '+e.message); }
+};
+SettingsV.removeListItem = async function(field, val){
+  try{ await fsSet('settings', CURRENT_CHURCH_ID, {[field]: (DB.settings[field]||[]).filter(x=>x!==val)}); }
+  catch(e){ console.error(e); toast('تعذر الحذف: '+e.message); }
 };
 
 /* ---------- Backup ---------- */
@@ -2992,6 +3197,28 @@ BackupV.restore = function(){
 };
 
 /* ---------- الاشتراك والدفع ---------- */
+/* ---- رفع صور ذكي: base64 للصور الصغيرة، ورفع تلقائي لـ Cloudinary للصور الكبيرة ----
+   ده بالظبط نفس النظام اللي كان مستخدم فى المشروع القديم لحل مشكلة تخطي حد حجم مستند Firestore (1 ميجا)
+   لما بيتراكم أكتر من صورة/مرفق. لو الـ cloud name أو الـ preset مختلفين عندك، غيّرهم هنا. */
+const CLOUDINARY_CONFIG = { cloudName: 'upxjbdew', uploadPreset: 'chat_uploads' };
+async function smartImageUpload(file, maxDim=900, quality=0.65){
+  const base64 = await compressImage(file, maxDim, quality);
+  const approxBytes = Math.round(base64.length * 0.75); // تقدير الحجم الفعلي بعد فك ترميز base64
+  if(approxBytes <= 600*1024) return base64; // صغيرة بما يكفي — تتخزن base64 مباشرة زي ما هي
+  // أكبر من 600 كيلو → ترفع تلقائيًا على Cloudinary ونخزّن رابطها بس (نص قصير جدًا)
+  try{
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('upload_preset', CLOUDINARY_CONFIG.uploadPreset);
+    const res = await fetch(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CONFIG.cloudName}/image/upload`, {method:'POST', body:fd});
+    const data = await res.json();
+    if(data.secure_url) return data.secure_url;
+    throw new Error((data.error&&data.error.message) || 'فشل الرفع على Cloudinary');
+  }catch(e){
+    console.error('Cloudinary upload failed, falling back to compressed image', e);
+    return base64; // احتياطي: استخدم النسخة المضغوطة حتى لو أكبر من المثالي، أفضل من فشل كامل
+  }
+}
 function compressImage(file, maxDim, quality){
   return new Promise((resolve, reject)=>{
     const reader = new FileReader();
@@ -3113,7 +3340,7 @@ Billing.submitProof = async function(){
   if(!file){ toast('اختر صورة إثبات التحويل أولًا'); return; }
   btn.disabled = true; btn.textContent = 'جاري الرفع...';
   try{
-    const imageBase64 = await compressImage(file, 900, 0.6);
+    const imageBase64 = await smartImageUpload(file, 900, 0.6);
     await fsAddRaw('paymentProofs', {
       churchId: CURRENT_CHURCH_ID, churchName: CURRENT_CHURCH?CURRENT_CHURCH.name:'',
       methodId: methodSel?methodSel.value:'', methodName, senderAccount, discountCode: discountCode||null,
@@ -3188,7 +3415,7 @@ Chat.send = async function(){
       churchId: CURRENT_CHURCH_ID, senderRole: IMPERSONATING?'admin':CURRENT_USER.role, senderName: CURRENT_USER.name,
       text, createdAt: Date.now(), readBySA:false, readByChurch:true,
     };
-    if(file) payload.imageBase64 = await compressImage(file, 900, 0.6);
+    if(file) payload.imageBase64 = await smartImageUpload(file, 900, 0.6);
     await fsAddRaw('chatMessages', payload);
     Chat.clearFile();
   }catch(e){ console.error(e); toast('تعذر إرسال الرسالة: '+e.message); }
@@ -3244,7 +3471,7 @@ Tickets.submit = async function(){
       type, title, description: desc, status:'مفتوحة', adminReply:'', hasAdminUpdate:false, cancelledByChurch:false,
       createdAt: Date.now(), updatedAt: Date.now(), readBySA:false, readByChurch:true,
     };
-    if(file) payload.attachmentImg = await compressImage(file, 900, 0.6);
+    if(file) payload.attachmentImg = await smartImageUpload(file, 900, 0.6);
     await fsAddRaw('tickets', payload);
     UI.closeModal();
     toast('تم إرسال التذكرة برقم '+ticketNo);
@@ -3314,13 +3541,49 @@ function applyTheme(key){
 document.getElementById('login-pass').addEventListener('keydown', e=>{ if(e.key==='Enter') App.login(); });
 document.getElementById('login-user').addEventListener('keydown', e=>{ if(e.key==='Enter') document.getElementById('login-pass').focus(); });
 // رابط "تواصل معنا" العام في شاشة الدخول — بيتحمّل حتى قبل تسجيل الدخول
+// تسجيل الـ Service Worker (PWA) — بيسمح بتثبيت النظام كتطبيق على شاشة الموبايل
+if('serviceWorker' in navigator){
+  window.addEventListener('load', ()=>{ navigator.serviceWorker.register('service-worker.js').catch(e=>console.error('SW register failed', e)); });
+}
+let PUBLIC_CONTACTS = {};
+let ANNOUNCEMENT_DISMISSED = false;
 getDoc(doc(dbFire,'platformConfig','public')).then(d=>{
   const cfg = d.exists() ? d.data() : {};
   if(cfg.theme) applyTheme(cfg.theme);
-  const link = cfg.contactLink||'';
+  PUBLIC_CONTACTS = cfg.contacts || {};
   const el = document.getElementById('public-contact-link');
-  if(el && link){ el.style.display='block'; el.innerHTML = `<a href="${esc(link)}" target="_blank" rel="noopener">💬 تواصل معنا</a>`; }
+  const hasAny = Object.values(PUBLIC_CONTACTS).some(v=>v);
+  if(el && hasAny) el.style.display='block';
+  if(cfg.announcement && cfg.announcement.enabled && cfg.announcement.text && !ANNOUNCEMENT_DISMISSED){
+    document.getElementById('announcement-text').textContent = cfg.announcement.text;
+    document.getElementById('announcement-bar').style.display = 'flex';
+  }
 }).catch(()=>{});
+App.dismissAnnouncement = function(){
+  ANNOUNCEMENT_DISMISSED = true;
+  document.getElementById('announcement-bar').style.display = 'none';
+};
+/* نافذة "تواصل معنا" — قنوات تواصل مباشرة بس (بدون تذاكر، متاحة حتى لغير المسجّلين) */
+App.showContactModal = function(){
+  const c = PUBLIC_CONTACTS;
+  const items = [
+    {key:'whatsapp', ic:'💬', label:'واتساب', href: c.whatsapp},
+    {key:'facebook', ic:'📘', label:'فيسبوك', href: c.facebook},
+    {key:'telegram', ic:'✈️', label:'تليجرام', href: c.telegram},
+    {key:'email', ic:'✉️', label:'البريد الإلكتروني', href: c.email? 'mailto:'+c.email : ''},
+    {key:'phone', ic:'📞', label:'اتصال مباشر', href: c.phone? 'tel:'+c.phone : ''},
+  ].filter(i=>i.href);
+  UI.openModal('📞 تواصل معنا', `
+    <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(120px,1fr)); gap:10px;">
+      ${items.length ? items.map(i=>`
+        <a href="${esc(i.href)}" target="_blank" rel="noopener" style="text-decoration:none; color:inherit; text-align:center; border:1px solid var(--line); border-radius:10px; padding:16px 8px;">
+          <div style="font-size:26px; margin-bottom:6px;">${i.ic}</div>
+          <div style="font-size:12.5px; color:var(--ink);">${i.label}</div>
+        </a>
+      `).join('') : `<p class="muted">لا توجد وسائل تواصل مُعلنة حاليًا.</p>`}
+    </div>
+  `, `<button class="btn btn-ghost btn-block" onclick="UI.closeModal()">إغلاق</button>`);
+};
 // ملاحظة: باقي الإقلاع (تحميل بيانات المستخدم والتنقل للوحة التحكم) يتم داخل onAuthStateChanged بالأعلى.
 
 /* تعريض الكائنات اللازمة للـ window لأن هذا الملف module والـ onclick في الـ HTML بيدور في النطاق العام */
