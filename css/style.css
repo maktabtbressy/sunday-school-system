@@ -209,11 +209,12 @@
   .status-dd-item:hover{background:var(--paper);}
   .status-dd-item.active{background:var(--gold-soft); font-weight:700;}
 
-  /* شريط الإعلان المتحرك (زي شريط الأخبار) */
-  #announcement-bar{position:sticky; top:0; z-index:200; background:var(--navy); color:#fff; display:flex; align-items:center; height:34px; overflow:hidden; direction:ltr;}
+  /* شريط الإعلان المتحرك (زي شريط الأخبار) — حركة مستمرة سلسة من الشمال لليمين */
+  #announcement-bar{position:sticky; top:0; z-index:200; background:var(--navy); color:#fff; display:flex; align-items:center; height:34px; overflow:hidden;}
   .announcement-track{flex:1; overflow:hidden; white-space:nowrap; position:relative; height:100%; display:flex; align-items:center;}
-  #announcement-text{display:inline-block; padding-right:100%; animation:announcement-scroll 22s linear infinite; font-size:13px; font-weight:600; direction:rtl;}
-  @keyframes announcement-scroll{ from{transform:translateX(0);} to{transform:translateX(-100%);} }
+  .announcement-track .ann-inner{display:inline-flex; width:max-content; animation:announcement-scroll 18s linear infinite;}
+  .announcement-track .ann-inner span{padding-inline-end:60px; font-size:13px; font-weight:600; white-space:nowrap;}
+  @keyframes announcement-scroll{ from{transform:translateX(-50%);} to{transform:translateX(0);} }
   #announcement-close{background:transparent; border:none; color:#fff; opacity:.75; cursor:pointer; font-size:14px; padding:0 12px; flex-shrink:0;}
   #announcement-close:hover{opacity:1;}
 

@@ -138,7 +138,34 @@ Scanner.close = function(){
   Scanner._stream = null;
   UI.closeModal();
 };
+/* ---- عرض مرفقات الشات كأيقونة صغيرة بدل صورة كبيرة، مع نافذة معاينة + تحميل/مشاركة ---- */
+function chatAttachmentThumb(img){
+  return `<div onclick="previewChatImage('${img.replace(/'/g,"\\'")}')" style="width:56px; height:56px; border-radius:9px; overflow:hidden; cursor:pointer; border:1px solid rgba(0,0,0,.12); flex-shrink:0;"><img src="${img}" style="width:100%; height:100%; object-fit:cover;"></div>`;
+}
+function previewChatImage(url){
+  UI.openModal('مرفق', `<div style="text-align:center;"><img src="${url}" style="max-width:100%; border-radius:10px; border:1px solid var(--line);"></div>`,
+    `<a class="btn btn-primary btn-block" href="${url}" target="_blank" rel="noopener" download>⬇️ فتح / تحميل</a>
+     <button class="btn btn-ghost btn-block" onclick="shareChatImage('${url.replace(/'/g,"\\'")}')">📤 مشاركة الرابط</button>`);
+}
+async function shareChatImage(url){
+  try{
+    if(navigator.share){ await navigator.share({url}); return; }
+  }catch(e){ return; } // المستخدم لغى نافذة المشاركة، تجاهل
+  try{ await navigator.clipboard.writeText(url); toast('تم نسخ رابط الصورة'); }catch(e){ /* تجاهل */ }
+}
+window.previewChatImage = previewChatImage;
+window.shareChatImage = shareChatImage;
 window.Scanner = Scanner;
+/* هذه الدوال بتتنادى من داخل onclick/onchange/oninput فى الـ HTML مباشرة، وبما إن app.js
+   شغّال كـ ES module فكل الدوال بتبقى محجوبة جوه نطاق الملف ومش متاحة عالميًا تلقائيًا —
+   لازم نصدّرها لـ window يدويًا، وإلا أي زرار أو حقل بيستخدمها هيفشل بصمت (مفيش أي رد فعل). */
+window.mpOnStageChange = mpOnStageChange;
+window.mpOnGradeChange = mpOnGradeChange;
+window.mpRenderResults = mpRenderResults;
+window.mpSelect = mpSelect;
+window.mpSelectByCode = mpSelectByCode;
+window.handlePhotoSelect = handlePhotoSelect;
+window.clearPhotoField = clearPhotoField;
 /* ---- أداة اختيار مخدوم واحد: بحث بالاسم/الكود + فلترة مرحلة/صف/فصل + قراءة باركود ---- */
 function memberPickerHtml(fieldId, selectedId){
   const sel = selectedId ? byId(DB.members, selectedId) : null;
@@ -373,7 +400,10 @@ async function fsDeleteWhere(col, field, value){
 }
 async function log(action, details){
   try{
-    const payload = { date: new Date().toISOString(), user: CURRENT_USER ? CURRENT_USER.name : '—', action, details: details||'' };
+    // لو المالك داخل مؤقتًا على لوحة كنيسة (Impersonation)، يتسجّل باسم "الإدارة" بس
+    // من غير اسمه الشخصي، حفاظًا على خصوصية الطرفين — مع إبقاء وجود الإجراء نفسه واضح للكنيسة.
+    const userLabel = IMPERSONATING ? 'الإدارة' : (CURRENT_USER ? CURRENT_USER.name : '—');
+    const payload = { date: new Date().toISOString(), user: userLabel, action, details: details||'' };
     if(CURRENT_CHURCH_ID) payload.churchId = CURRENT_CHURCH_ID;
     await addDoc(collection(dbFire,'auditLog'), payload);
   }catch(e){ console.error('audit log failed', e); }
@@ -742,6 +772,7 @@ let SA_ACTIVITY_FILTERS = {from:'', to:''};
 let SA_REPORT_FILTERS = {from:'', to:'', category:''};
 let SA_PLANS = [];
 let SA_DISCOUNT_CODES = [];
+let SA_DECISION_TEMPLATES = {};
 let SA_CHURCH_STATUS_FILTER = '';
 const CHURCH_STATUS_ICONS = {pending:'🆕', trial:'🔄', active:'✅', expired:'⏰', rejected:'🚫', exempt:'🎁'};
 let SA_SUBADMINS = [];
@@ -844,6 +875,12 @@ SuperAdmin.boot = function(){
     if(SA_PAGE==='plans') SuperAdmin.render();
   }, err=>console.error(err));
 
+  // قوالب رسائل مركز اتخاذ القرارات
+  onSnapshot(doc(dbFire,'platformConfig','decisionTemplates'), d=>{
+    SA_DECISION_TEMPLATES = d.exists() ? d.data() : {};
+    if(SA_PAGE==='decisions') SuperAdmin.render();
+  }, err=>console.error(err));
+
   // إدارة الأدمن الفرعي — للمالك الحقيقي بس (مش للأدمن الفرعي نفسه، عشان ميديش صلاحيات لنفسه)
   if(CURRENT_USER.role==='superadmin'){
     onSnapshot(query(collection(dbFire,'users'), where('role','==','subadmin')), snap=>{
@@ -856,7 +893,7 @@ SuperAdmin.boot = function(){
     }, err=>console.error(err));
   }
 };
-const SA_PAGE_TITLES = {churches:'الكنايس', requests:'طلبات جديدة', methods:'طرق الدفع', plans:'الخطط والعروض', payments:'مراجعة المدفوعات', chats:'الدردشات', tickets:'التذاكر', links:'المظهر والروابط', activity:'سجل النشاط', report:'تقرير شامل', subadmins:'الأدمن الفرعي'};
+const SA_PAGE_TITLES = {churches:'الكنايس', requests:'طلبات جديدة', methods:'طرق الدفع', plans:'الخطط والعروض', payments:'مراجعة المدفوعات', chats:'الدردشات', tickets:'التذاكر', links:'المظهر والروابط', activity:'سجل النشاط', report:'تقرير شامل', subadmins:'الأدمن الفرعي', decisions:'مركز اتخاذ القرارات'};
 SuperAdmin.navigate = function(page){
   stopScannerIfActive();
   SA_PAGE = page;
@@ -891,6 +928,7 @@ SuperAdmin.render = function(){
   if(SA_PAGE==='plans'){ el.className=''; SuperAdmin.renderPlans(el); return; }
   if(SA_PAGE==='payments'){ el.className=''; SuperAdmin.renderPayments(el); return; }
   if(SA_PAGE==='report'){ el.className=''; SuperAdmin.renderReport(el); return; }
+  if(SA_PAGE==='decisions'){ el.className=''; SuperAdmin.renderDecisions(el); return; }
   if(SA_PAGE==='chats'){ el.className=''; SuperAdmin.renderChats(el); return; }
   if(SA_PAGE==='tickets'){ el.className=''; SuperAdmin.renderTickets(el); return; }
   if(SA_PAGE==='links'){ el.className=''; SuperAdmin.renderLinks(el); return; }
@@ -1099,48 +1137,91 @@ SuperAdmin.renderMethods = function(el){
       <button class="btn btn-gold btn-sm" onclick="SuperAdmin.openMethodForm()">+ إضافة طريقة دفع</button>
     </div>
     <div class="info-card-grid">
-      ${SA_METHODS.length ? SA_METHODS.map(m=>`<div class="card card-pad">
+      ${SA_METHODS.length ? SA_METHODS.map(m=>{
+        const accs = methodAccountsOf(m);
+        return `<div class="card card-pad">
         <div class="section-head" style="margin-bottom:6px;"><h2 style="font-size:14.5px;">${esc(m.name)}</h2>
           <span class="pill ${m.active!==false?'pill-active':'pill-inactive'}">${m.active!==false?'مفعّلة':'متوقفة'}</span>
         </div>
-        <div style="font-size:14.5px; font-weight:800; color:var(--navy); font-family:'Markazi Text',serif; line-height:1.7;">
-          ${(m.accounts&&m.accounts.length? m.accounts : splitAccounts(m.details)).map(a=>linkifyText(a)).join('<br>')}
+        <div style="display:flex; flex-direction:column; gap:8px;">
+          ${accs.map(a=>`
+            <div style="display:flex; align-items:center; gap:8px;">
+              ${a.image? `<img src="${a.image}" onclick="UI.previewImage('${a.image.replace(/'/g,"\\'")}')" style="width:40px; height:40px; border-radius:8px; object-fit:cover; border:1px solid var(--line); cursor:pointer; flex-shrink:0;">` : ''}
+              <div style="font-size:13.5px; font-weight:800; color:var(--navy); font-family:'Markazi Text',serif;">${linkifyText(a.value)}</div>
+            </div>
+          `).join('')}
         </div>
-        ${m.qrImage? `<img src="${m.qrImage}" style="max-width:100%; max-height:140px; border-radius:8px; border:1px solid var(--line); margin-top:8px;">` : ''}
         ${m.instructions?`<p class="muted" style="margin-top:6px;">${esc(m.instructions)}</p>`:''}
         <div class="row-actions" style="margin-top:12px;">
           <button class="btn btn-ghost btn-sm" onclick="SuperAdmin.openMethodForm('${m.id}')">تعديل</button>
-          <button class="btn btn-ghost btn-sm" onclick="SuperAdmin.openAttachmentsModal('${m.id}')">🖼️ المرفقات</button>
           <button class="btn btn-danger btn-sm" onclick="SuperAdmin.removeMethod('${m.id}')">حذف</button>
         </div>
-      </div>`).join('') : `<p class="muted">لا توجد طرق دفع مضافة بعد.</p>`}
+      </div>`;}).join('') : `<p class="muted">لا توجد طرق دفع مضافة بعد.</p>`}
     </div>
   `;
 };
+/* توحيد شكل الحسابات بغض النظر عن الشكل القديم (نص فقط) أو الجديد ({value,image}) */
+function methodAccountsOf(m){
+  if(m.accounts && m.accounts.length && typeof m.accounts[0]==='object') return m.accounts;
+  if(m.accounts && m.accounts.length) return m.accounts.map(v=>({value:v, image:m.qrImage||null}));
+  return splitAccounts(m.details).map(v=>({value:v, image:m.qrImage||null}));
+}
+let METHOD_FORM_ACCOUNTS = [];
 SuperAdmin.openMethodForm = function(id){
   const m = id ? SA_METHODS.find(x=>x.id===id) : {};
+  METHOD_FORM_ACCOUNTS = id ? methodAccountsOf(m).map(a=>({...a})) : [{value:'', image:null}];
+  if(!METHOD_FORM_ACCOUNTS.length) METHOD_FORM_ACCOUNTS = [{value:'', image:null}];
   UI.openModal(id?'تعديل طريقة دفع':'إضافة طريقة دفع', `
-    <div class="field"><label>اسم الطريقة</label><input id="f-name" value="${esc(m.name||'')}" placeholder="مثال: فودافون كاش"></div>
-    <div class="field"><label>الأرقام/الحسابات (رقم أو لينك دفع في كل سطر، أو افصل بينهم بفاصلة , أو ، أو ؛)</label>
-      <textarea id="f-details" rows="3" placeholder="مثال:&#10;01012345678&#10;https://ipn.eg/S/xxxx/instapay/xxx">${esc((m.accounts&&m.accounts.length? m.accounts.join('\n') : m.details)||'')}</textarea>
-    </div>
-    <div class="field"><label>صورة / QR كود (اختياري)</label><input type="file" id="f-qr" accept="image/*">
-      ${m.qrImage? `<img src="${m.qrImage}" style="max-width:160px; margin-top:8px; border-radius:8px; border:1px solid var(--line);">`:''}
+    <div class="field"><label>اسم طريقة الدفع</label><input id="f-name" value="${esc(m.name||'')}" placeholder="مثال: محفظة فودافون كاش"></div>
+    <div class="field full">
+      <label>الأرقام/الحسابات (كل رقم بصورته الخاصة بيه، عشان العميل ميتلخبطش)</label>
+      <div id="method-accounts-list"></div>
+      <button type="button" class="btn btn-ghost btn-sm" style="margin-top:6px;" onclick="SuperAdmin.addAccountRow()">+ إضافة رقم جديد</button>
     </div>
     <div class="field"><label>تعليمات إضافية (اختياري)</label><textarea id="f-instructions" rows="2">${esc(m.instructions||'')}</textarea></div>
-    <div class="field"><label><input type="checkbox" id="f-active" ${m.active!==false?'checked':''}> مفعّلة (تظهر للكنايس)</label></div>
+    <label style="display:flex; align-items:center; gap:8px; font-weight:400; font-size:13px; margin-top:6px;">
+      <input type="checkbox" id="f-active" ${m.active!==false?'checked':''}> طريقة دفع مفعّلة (تظهر للكنايس)
+    </label>
   `, `<button class="btn btn-primary" onclick="SuperAdmin.saveMethod('${id||''}')">حفظ</button><button class="btn btn-ghost" onclick="UI.closeModal()">إلغاء</button>`);
+  SuperAdmin.renderAccountRows();
+};
+SuperAdmin.renderAccountRows = function(){
+  const box = document.getElementById('method-accounts-list');
+  if(!box) return;
+  box.innerHTML = METHOD_FORM_ACCOUNTS.map((a,i)=>`
+    <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px; padding:8px; border:1px solid var(--line); border-radius:10px;">
+      <div style="width:52px; height:52px; border-radius:8px; overflow:hidden; background:var(--paper); display:flex; align-items:center; justify-content:center; flex-shrink:0; border:1px solid var(--line); ${a.image?'cursor:pointer;':''}" ${a.image?`onclick="UI.previewImage('${a.image.replace(/'/g,"\\'")}')"`:''}>
+        ${a.image? `<img src="${a.image}" style="width:100%; height:100%; object-fit:cover;">` : '🖼️'}
+      </div>
+      <input value="${esc(a.value||'')}" placeholder="رقم الحساب أو رابط الدفع" oninput="METHOD_FORM_ACCOUNTS[${i}].value=this.value" style="flex:1;">
+      <input type="file" accept="image/*" id="acc-file-${i}" style="display:none;" onchange="SuperAdmin.setAccountImage(${i})">
+      <button type="button" class="btn btn-ghost btn-sm" onclick="document.getElementById('acc-file-${i}').click()">📷</button>
+      <button type="button" class="btn btn-danger btn-sm" onclick="SuperAdmin.removeAccountRow(${i})">✖</button>
+    </div>
+  `).join('');
+};
+SuperAdmin.addAccountRow = function(){ METHOD_FORM_ACCOUNTS.push({value:'', image:null}); SuperAdmin.renderAccountRows(); };
+SuperAdmin.removeAccountRow = function(i){
+  METHOD_FORM_ACCOUNTS.splice(i,1);
+  if(!METHOD_FORM_ACCOUNTS.length) METHOD_FORM_ACCOUNTS.push({value:'', image:null});
+  SuperAdmin.renderAccountRows();
+};
+SuperAdmin.setAccountImage = async function(i){
+  const file = document.getElementById('acc-file-'+i).files[0];
+  if(!file) return;
+  try{
+    METHOD_FORM_ACCOUNTS[i].image = await smartImageUpload(file, 700, 0.7);
+    SuperAdmin.renderAccountRows();
+  }catch(e){ console.error(e); toast('تعذر رفع الصورة: '+e.message); }
 };
 SuperAdmin.saveMethod = async function(id){
   const name = document.getElementById('f-name').value.trim();
-  const accounts = splitAccounts(document.getElementById('f-details').value);
+  const accounts = METHOD_FORM_ACCOUNTS.filter(a=>a.value && a.value.trim()).map(a=>({value:a.value.trim(), image:a.image||null}));
   if(!name||!accounts.length) return toast('أدخل اسم الطريقة ورقم/حساب واحد على الأقل');
-  const data = { name, accounts, details: accounts.join(', '), instructions: document.getElementById('f-instructions').value.trim(), active: document.getElementById('f-active').checked };
-  const qrFile = document.getElementById('f-qr').files[0];
+  const data = { name, accounts, details: accounts.map(a=>a.value).join(', '), instructions: document.getElementById('f-instructions').value.trim(), active: document.getElementById('f-active').checked };
   try{
-    if(qrFile) data.qrImage = await smartImageUpload(qrFile, 500, 0.7);
     if(id) await updateDoc(doc(dbFire,'paymentMethods',id), data);
-    else await addDoc(collection(dbFire,'paymentMethods'), data);
+    else await fsAddRaw('paymentMethods', data);
     UI.closeModal(); toast('تم الحفظ بنجاح');
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
 };
@@ -1356,7 +1437,7 @@ SuperAdmin.renderChatMessages = function(){
           <span>${esc(m.senderName)}</span>
           <a style="cursor:pointer; ${mine?'color:#fff;':'color:var(--absent);'}" title="حذف الرسالة" onclick="deleteChatMessage('${m.id}')">🗑</a>
         </div>
-        ${m.imageBase64? `<img src="${m.imageBase64}" style="max-width:100%; border-radius:8px; margin-bottom:${m.text?'6px':'0'}; cursor:pointer;" onclick="window.open('${m.imageBase64}','_blank')">` : ''}
+        ${m.imageBase64? chatAttachmentThumb(m.imageBase64) : ''}
         ${m.text? esc(m.text) : ''}
       </div>
     </div>`;
@@ -1556,7 +1637,9 @@ SuperAdmin.renderLinks = function(el){
       <div class="form-grid">
         <div class="field"><label>واتساب (رابط wa.me كامل)</label><input id="pc-whatsapp" value="${esc(SA_PUBLIC_CONFIG.contacts?.whatsapp||'')}" placeholder="https://wa.me/2010xxxxxxxx"></div>
         <div class="field"><label>فيسبوك</label><input id="pc-facebook" value="${esc(SA_PUBLIC_CONFIG.contacts?.facebook||'')}" placeholder="https://facebook.com/..."></div>
+        <div class="field"><label>إنستجرام</label><input id="pc-instagram" value="${esc(SA_PUBLIC_CONFIG.contacts?.instagram||'')}" placeholder="https://instagram.com/..."></div>
         <div class="field"><label>تليجرام</label><input id="pc-telegram" value="${esc(SA_PUBLIC_CONFIG.contacts?.telegram||'')}" placeholder="https://t.me/..."></div>
+        <div class="field"><label>إنستجرام</label><input id="pc-instagram" value="${esc(SA_PUBLIC_CONFIG.contacts?.instagram||'')}" placeholder="https://instagram.com/..."></div>
         <div class="field"><label>البريد الإلكتروني</label><input id="pc-email" value="${esc(SA_PUBLIC_CONFIG.contacts?.email||'')}" placeholder="support@example.com"></div>
         <div class="field"><label>رقم الاتصال المباشر</label><input id="pc-phone" value="${esc(SA_PUBLIC_CONFIG.contacts?.phone||'')}" placeholder="0100xxxxxxx"></div>
       </div>
@@ -1607,7 +1690,9 @@ SuperAdmin.savePublicContact = async function(){
   const contacts = {
     whatsapp: document.getElementById('pc-whatsapp').value.trim(),
     facebook: document.getElementById('pc-facebook').value.trim(),
+    instagram: document.getElementById('pc-instagram').value.trim(),
     telegram: document.getElementById('pc-telegram').value.trim(),
+    instagram: document.getElementById('pc-instagram').value.trim(),
     email: document.getElementById('pc-email').value.trim(),
     phone: document.getElementById('pc-phone').value.trim(),
   };
@@ -1914,6 +1999,75 @@ SuperAdmin.removeSubAdmin = async function(uid){
   catch(e){ console.error(e); toast('تعذر الحذف: '+e.message); }
 };
 
+/* ---- مركز اتخاذ القرارات: كشف تلقائي لحالات محتاجة قرار + قوالب رسائل + إرسال تنبيه ----
+   ملاحظة مهمة: النظام مالوش سيرفر بريد إلكتروني فعلي (مفيش Cloud Functions ولا خدمة إيميل مربوطة)،
+   فـ"إرسال التنبيه" بيبعت رسالة فعلية عبر نفس نظام الدردشة الموجود أصلاً بينك وبين الكنيسة (هيوصلها
+   إشعار وشارة "غير مقروء" بالظبط زي أي رسالة شات)، بدل ما ندّعي إرسال إيميل حقيقي مش موجود عندنا.
+   والحذف دايمًا يدوي بموافقتك — مفيش حذف تلقائي لأي كنيسة مهما طالت مدة عدم الاستخدام. */
+const DECISION_TEMPLATE_DEFAULTS = {
+  subscriptionEnded: 'سلام ونعمة، اشتراككم في نظام إدارة مدارس الأحد انتهى. برجاء تجديد الاشتراك من شاشة "الاشتراك والدفع" حتى تقدروا تكملوا استخدام النظام بدون انقطاع.',
+  trialExpiredNoUpgrade: 'سلام ونعمة، فترة التجربة المجانية بتاعتكم انتهت من فترة ولسه محدّش فعّل اشتراك. لو حابين تكملوا معانا، برجاء تفعيل الاشتراك من شاشة "الاشتراك والدفع".',
+  longInactive: 'سلام ونعمة، لاحظنا إن حساب كنيستكم مش مُفعّل من فترة طويلة. لو محتاجين مساعدة أو عندكم استفسار، تواصلوا معانا في أقرب وقت، وإلا هنضطر نراجع استمرارية الحساب.',
+};
+SuperAdmin.renderDecisions = function(el){
+  const t = {...DECISION_TEMPLATE_DEFAULTS, ...SA_DECISION_TEMPLATES};
+  const now = Date.now();
+  const subscriptionEnded = SA_CHURCHES.filter(c=> c.status==='active' && c.activeUntil && new Date(c.activeUntil).getTime()<=now);
+  const trialExpiredLong = SA_CHURCHES.filter(c=> c.status==='trial' && c.trialEndsAt && (now-new Date(c.trialEndsAt).getTime()) > 30*86400000);
+  const longInactive = SA_CHURCHES.filter(c=>{
+    if(!['expired','rejected'].includes(c.status) && !(c.status==='active' && c.activeUntil && new Date(c.activeUntil).getTime()<=now)) return false;
+    const refDate = c.activeUntil || c.trialEndsAt || c.createdAt;
+    return refDate && (now - new Date(refDate).getTime()) > 120*86400000;
+  });
+
+  const section = (title, list, tplKey, extraBtn)=> `
+    <div class="section-head"><h2>${title} <span class="muted" style="font-size:12px;">(${list.length})</span></h2></div>
+    <div class="card" style="margin-bottom:20px;">
+      ${list.length ? list.map(c=>`
+        <div style="padding:12px 16px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
+          <b>${esc(c.name)}</b>
+          <div class="row-actions">
+            <button class="btn btn-ghost btn-sm" onclick="SuperAdmin.sendDecisionAlert('${c.id}','${tplKey}')">📩 إرسال تنبيه (عبر الدردشة)</button>
+            ${extraBtn ? extraBtn(c) : ''}
+          </div>
+        </div>
+      `).join('') : `<p class="muted" style="padding:16px;">لا توجد كنايس فى هذه الحالة حاليًا.</p>`}
+    </div>
+  `;
+
+  el.innerHTML = `
+    <div class="card card-pad" style="margin-bottom:20px;">
+      <b style="font-size:13px; display:block; margin-bottom:10px;">✏️ قوالب الرسائل (تقدر تعدّلها براحتك)</b>
+      <div class="field"><label>رسالة "انتهى الاشتراك"</label><textarea id="dt-subscriptionEnded" rows="2">${esc(t.subscriptionEnded)}</textarea></div>
+      <div class="field"><label>رسالة "انتهت التجربة ولسه محدّش فعّل"</label><textarea id="dt-trialExpiredNoUpgrade" rows="2">${esc(t.trialExpiredNoUpgrade)}</textarea></div>
+      <div class="field"><label>رسالة "غير نشطة من فترة طويلة"</label><textarea id="dt-longInactive" rows="2">${esc(t.longInactive)}</textarea></div>
+      <button class="btn btn-primary btn-sm" onclick="SuperAdmin.saveDecisionTemplates()">حفظ القوالب</button>
+    </div>
+
+    ${section('⏰ اشتراكات انتهت', subscriptionEnded, 'subscriptionEnded')}
+    ${section('🆓 تجربة انتهت من أكتر من شهر بدون تفعيل', trialExpiredLong, 'trialExpiredNoUpgrade')}
+    ${section('💤 غير نشطة من أكتر من ٤ شهور (مرشّحة للمراجعة)', longInactive, 'longInactive', c=>`<button class="btn btn-danger btn-sm" onclick="SuperAdmin.deleteChurch('${c.id}','${esc(c.name).replace(/'/g,"\\'")}')">🗑 حذف نهائي (كل بياناتها)</button>`)}
+  `;
+};
+SuperAdmin.saveDecisionTemplates = async function(){
+  const data = {
+    subscriptionEnded: document.getElementById('dt-subscriptionEnded').value.trim(),
+    trialExpiredNoUpgrade: document.getElementById('dt-trialExpiredNoUpgrade').value.trim(),
+    longInactive: document.getElementById('dt-longInactive').value.trim(),
+  };
+  try{ await setDoc(doc(dbFire,'platformConfig','decisionTemplates'), data, {merge:true}); toast('تم حفظ القوالب'); }
+  catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
+};
+SuperAdmin.sendDecisionAlert = async function(churchId, tplKey){
+  const t = {...DECISION_TEMPLATE_DEFAULTS, ...SA_DECISION_TEMPLATES};
+  const text = t[tplKey];
+  try{
+    await fsAddRaw('chatMessages', { churchId, senderRole:'superadmin', senderName: CURRENT_USER.name, text, createdAt: Date.now(), readBySA:true, readByChurch:false });
+    await saLog('إرسال تنبيه (مركز القرارات)', byId(SA_CHURCHES,churchId)?.name||churchId);
+    toast('تم إرسال التنبيه عبر الدردشة');
+  }catch(e){ console.error(e); toast('تعذر الإرسال: '+e.message); }
+};
+
 window.SuperAdmin = SuperAdmin;
 
 /* ---------------- Nav ---------------- */
@@ -2030,24 +2184,30 @@ Views.dashboard = function(){
 
   $content().innerHTML = `
     <div class="stat-grid">
-      ${statCard('إجمالي المخدومين', activeMembers.length,'')}
-      ${statCard('إجمالي الخدام', D.servants.filter(s=>s.status!=='inactive').length,'')}
-      ${statCard('المراحل / الفصول', D.stages.length+' / '+D.classes.length,'')}
-      ${statCard('حضور اليوم', presentToday,'good')}
-      ${statCard('غياب اليوم', absentToday,'bad')}
-      ${statCard('متوسط التقييم', avgEval,'accent')}
-      ${statCard('مخدومون جدد (٣٠ يوم)', newMembersCount,'')}
-      ${statCard('بحاجة لمتابعة', needFollowup.length,'bad')}
+      ${statCard('إجمالي المخدومين', activeMembers.length,'', "App.navigate('members')")}
+      ${statCard('إجمالي الخدام', D.servants.filter(s=>s.status!=='inactive').length,'', "App.navigate('servants')")}
+      ${statCard('المراحل / الفصول', D.stages.length+' / '+D.classes.length,'', "App.navigate('stages')")}
+      ${statCard('حضور اليوم', presentToday,'good', "App.navigate('attendance')")}
+      ${statCard('غياب اليوم', absentToday,'bad', "App.navigate('attendance')")}
+      ${statCard('متوسط التقييم', avgEval,'accent', "App.navigate('evaluations')")}
+      ${statCard('مخدومون جدد (٣٠ يوم)', newMembersCount,'', "App.navigate('members')")}
+      ${statCard('بحاجة لمتابعة', needFollowup.length,'bad', "App.navigate('followups')")}
+    </div>
+    <div class="card card-pad" style="margin-bottom:18px;">
+      <div class="section-head"><h2>نسبة الحضور والغياب</h2></div>
+      <div class="toolbar no-print" style="margin-bottom:12px;">
+        <div class="field" style="margin:0;"><label>الوحدة</label>
+          <select id="dash-chart-unit"><option value="month">شهر</option><option value="day">يوم</option><option value="year">سنة</option></select>
+        </div>
+        <div class="field" style="margin:0;"><label>العدد</label><input type="number" id="dash-chart-count" value="1" min="1" max="24" style="width:80px;"></div>
+        <button class="btn btn-ghost btn-sm" onclick="DashboardChart.reset()">إعادة تعيين</button>
+        <button class="btn btn-primary btn-sm" onclick="DashboardChart.render()">📊 عرض</button>
+      </div>
+      <div id="dash-chart-box"></div>
     </div>
     <div class="dash-grid">
       <div class="card card-pad">
-        <div class="section-head"><h2>نسبة الحضور الشهرية</h2></div>
-        <div style="font-size:38px;font-weight:800;color:var(--navy);font-family:'Markazi Text',serif;">${monthPresentPct}%</div>
-        <div style="height:10px;background:var(--paper);border-radius:99px;overflow:hidden;margin-top:10px;">
-          <div style="height:100%;width:${monthPresentPct}%;background:var(--present);"></div>
-        </div>
-        <p class="muted" style="margin-top:14px;">بناءً على ${monthAtt.length} سجل حضور خلال آخر ٣٠ يومًا.</p>
-        <div class="section-head" style="margin-top:22px;"><h2>مخدومون بحاجة إلى متابعة</h2></div>
+        <div class="section-head"><h2>مخدومون بحاجة إلى متابعة</h2></div>
         ${needFollowup.length? `<table><tbody>${needFollowup.slice(0,6).map(m=>`
           <tr><td class="name-cell"><span class="avatar">${initials(m.name)}</span><span class="nm" onclick="App.navigate('memberProfile','${m.id}')">${esc(m.name)}</span></td>
           <td class="muted">${esc(nameOf(D.classes,m.classId))}</td>
@@ -2070,9 +2230,68 @@ Views.dashboard = function(){
       </div>
     </div>
   `;
+  DashboardChart.reset();
 };
-function statCard(label,num,cls){
-  return `<div class="stat-card ${cls||''}"><div class="stat-label">${label}</div><div class="stat-num">${num}</div></div>`;
+/* ---- رسم بياني نسبة الحضور/الغياب فى لوحة التحكم، بفلترة يوم/شهر/سنة ---- */
+const DashboardChart = {};
+DashboardChart.buildData = function(unit, count){
+  const buckets = [];
+  const now = new Date();
+  for(let i=count-1; i>=0; i--){
+    let start, end, label;
+    if(unit==='day'){
+      const d = new Date(now); d.setDate(d.getDate()-i);
+      start = end = d.toISOString().slice(0,10);
+      label = d.toLocaleDateString('ar-EG',{day:'2-digit',month:'2-digit'});
+    } else if(unit==='year'){
+      const y = now.getFullYear()-i;
+      start = y+'-01-01'; end = y+'-12-31';
+      label = String(y);
+    } else { // month (افتراضي)
+      const d = new Date(now.getFullYear(), now.getMonth()-i, 1);
+      start = d.toISOString().slice(0,10);
+      const endD = new Date(d.getFullYear(), d.getMonth()+1, 0);
+      end = endD.toISOString().slice(0,10);
+      label = d.toLocaleDateString('ar-EG',{month:'short', year:'2-digit'});
+    }
+    const recs = DB.attendance.filter(a=>a.date>=start && a.date<=end);
+    const total = recs.length;
+    const presentPct = total ? Math.round(recs.filter(a=>a.present).length/total*100) : 0;
+    buckets.push({label, presentPct, absentPct: total?100-presentPct:0, total});
+  }
+  return buckets;
+};
+DashboardChart.render = function(){
+  const box = document.getElementById('dash-chart-box');
+  if(!box) return;
+  const unit = document.getElementById('dash-chart-unit').value;
+  const count = Math.max(1, Math.min(24, Number(document.getElementById('dash-chart-count').value)||1));
+  const data = DashboardChart.buildData(unit, count);
+  box.innerHTML = `
+    <div style="display:flex; flex-direction:column; gap:10px;">
+      ${data.map(b=>`
+        <div>
+          <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:3px;">
+            <span>${b.label}</span><span class="muted">${b.total? b.presentPct+'% حضور':'لا يوجد سجلات'}</span>
+          </div>
+          <div style="height:12px; background:var(--absent-bg); border-radius:99px; overflow:hidden; display:flex;">
+            <div style="height:100%; width:${b.presentPct}%; background:var(--present);"></div>
+          </div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+};
+DashboardChart.reset = function(){
+  const unitSel = document.getElementById('dash-chart-unit');
+  const countInp = document.getElementById('dash-chart-count');
+  if(unitSel) unitSel.value = 'month';
+  if(countInp) countInp.value = 1;
+  DashboardChart.render();
+};
+window.DashboardChart = DashboardChart;
+function statCard(label,num,cls,onClick){
+  return `<div class="stat-card ${cls||''}" ${onClick?`style="cursor:pointer;" onclick="${onClick}"`:''}><div class="stat-label">${label}</div><div class="stat-num">${num}</div></div>`;
 }
 function initials(name){ return (name||'?').trim().slice(0,1); }
 function computeNeedFollowup(){
@@ -3272,13 +3491,16 @@ Views.billing = function(){
       <div class="section-head"><h2>طرق الدفع المتاحة</h2></div>
       <div class="info-card-grid" style="margin-bottom:20px;">
         ${methods.map(m=>`<div class="card card-pad">
-          <h3 style="font-size:14.5px; margin:0 0 6px;">${esc(m.name)}</h3>
-          <div style="font-size:16px; font-weight:800; color:var(--navy); font-family:'Markazi Text',serif; line-height:1.7;">
-            ${(m.accounts&&m.accounts.length? m.accounts : splitAccounts(m.details)).map(a=>linkifyText(a)).join('<br>')}
+          <h3 style="font-size:14.5px; margin:0 0 10px;">${esc(m.name)}</h3>
+          <div style="display:flex; flex-direction:column; gap:10px;">
+            ${methodAccountsOf(m).map(a=>`
+              <div style="display:flex; align-items:center; gap:10px;">
+                ${a.image? `<img src="${a.image}" onclick="UI.previewImage('${a.image.replace(/'/g,"\\'")}')" style="width:52px; height:52px; border-radius:8px; object-fit:cover; border:1px solid var(--line); cursor:pointer; flex-shrink:0;">` : ''}
+                <div style="font-size:15px; font-weight:800; color:var(--navy); font-family:'Markazi Text',serif;">${linkifyText(a.value)}</div>
+              </div>
+            `).join('')}
           </div>
           ${m.instructions? `<p class="muted" style="margin-top:8px;">${esc(m.instructions)}</p>`:''}
-          ${m.qrImage? `<img src="${m.qrImage}" style="max-width:140px; max-height:140px; border-radius:8px; border:1px solid var(--line); margin-top:10px; cursor:pointer;" onclick="UI.previewImage('${m.qrImage.replace(/'/g,"\\'")}')">` : ''}
-          <div class="attachment-grid" id="billing-att-${m.id}" style="margin-top:10px;"></div>
         </div>`).join('')}
       </div>
     ` : `<p class="muted" style="margin-bottom:20px;">لا توجد طرق دفع مُعلنة من الإدارة حاليًا.</p>`}
@@ -3310,22 +3532,6 @@ Views.billing = function(){
         <td>${p.status==='approved'?'<span class="pill pill-active">تم القبول</span>':p.status==='rejected'?'<span class="pill pill-inactive">مرفوض</span>':'<span class="church-status status-pending">قيد المراجعة</span>'}</td>
       </tr>`).join('')}</tbody></table>` : `<div class="empty-state">لا توجد طلبات دفع سابقة</div>`}</div>
   `;
-  methods.forEach(m => Billing.loadMethodAttachments(m.id));
-};
-/* تحميل مرفقات طريقة دفع معينة (بعد رسم الشاشة) وعرضها في الصندوق الخاص بها */
-Billing.loadMethodAttachments = async function(methodId){
-  try{
-    const snap = await getDocs(collection(dbFire,'paymentMethods',methodId,'attachments'));
-    const box = document.getElementById('billing-att-'+methodId);
-    if(!box) return; // المستخدم غيّر الصفحة قبل ما التحميل يخلص
-    const atts = snap.docs.map(d=>({id:d.id, ...d.data()})).sort((a,b)=>(a.createdAt||0)-(b.createdAt||0));
-    box.innerHTML = atts.map(a=>`
-      <div class="attachment-thumb">
-        <img src="${a.img}" onclick="UI.previewImage('${(a.img||'').replace(/'/g,"\\'")}')">
-        <small>${esc(a.label||'')}</small>
-      </div>
-    `).join('');
-  }catch(e){ /* عرض المرفقات مش حرج، لو فشل بنتجاهله بصمت */ }
 };
 Billing.submitProof = async function(){
   const fileInput = document.getElementById('proof-file');
@@ -3396,7 +3602,7 @@ Chat.renderMessages = function(){
           <span>${esc(m.senderName)}</span>
           ${mine? `<a style="cursor:pointer; color:var(--absent);" title="حذف الرسالة" onclick="deleteChatMessage('${m.id}')">🗑</a>` : ''}
         </div>
-        ${m.imageBase64? `<img src="${m.imageBase64}" style="max-width:100%; border-radius:8px; margin-bottom:${m.text?'6px':'0'}; cursor:pointer;" onclick="window.open('${m.imageBase64}','_blank')">` : ''}
+        ${m.imageBase64? chatAttachmentThumb(m.imageBase64) : ''}
         ${m.text? esc(m.text) : ''}
       </div>
     </div>`;
@@ -3556,6 +3762,7 @@ getDoc(doc(dbFire,'platformConfig','public')).then(d=>{
   if(el && hasAny) el.style.display='block';
   if(cfg.announcement && cfg.announcement.enabled && cfg.announcement.text && !ANNOUNCEMENT_DISMISSED){
     document.getElementById('announcement-text').textContent = cfg.announcement.text;
+    document.getElementById('announcement-text2').textContent = cfg.announcement.text;
     document.getElementById('announcement-bar').style.display = 'flex';
   }
 }).catch(()=>{});
@@ -3569,7 +3776,9 @@ App.showContactModal = function(){
   const items = [
     {key:'whatsapp', ic:'💬', label:'واتساب', href: c.whatsapp},
     {key:'facebook', ic:'📘', label:'فيسبوك', href: c.facebook},
+    {key:'instagram', ic:'📷', label:'إنستجرام', href: c.instagram},
     {key:'telegram', ic:'✈️', label:'تليجرام', href: c.telegram},
+    {key:'instagram', ic:'📷', label:'إنستجرام', href: c.instagram},
     {key:'email', ic:'✉️', label:'البريد الإلكتروني', href: c.email? 'mailto:'+c.email : ''},
     {key:'phone', ic:'📞', label:'اتصال مباشر', href: c.phone? 'tel:'+c.phone : ''},
   ].filter(i=>i.href);

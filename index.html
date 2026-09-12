@@ -19,7 +19,7 @@
 <body>
 
 <div id="announcement-bar" style="display:none;">
-  <div class="announcement-track"><span id="announcement-text"></span></div>
+  <div class="announcement-track"><div class="ann-inner" id="announcement-inner"><span id="announcement-text"></span><span id="announcement-text2"></span></div></div>
   <button id="announcement-close" onclick="App.dismissAnnouncement()" title="إغلاق مؤقت">✕</button>
 </div>
 
@@ -166,6 +166,7 @@
       <li data-perm="settings"><a class="nav-a" data-page="methods" onclick="SuperAdmin.navigate('methods')"><span class="ic">💰</span>طرق الدفع</a></li>
       <li data-perm="settings"><a class="nav-a" data-page="plans" onclick="SuperAdmin.navigate('plans')"><span class="ic">💳</span>الخطط والعروض</a></li>
       <li><a class="nav-a" data-page="report" onclick="SuperAdmin.navigate('report')"><span class="ic">📊</span>تقرير شامل</a></li>
+      <li data-perm="churches"><a class="nav-a" data-page="decisions" onclick="SuperAdmin.navigate('decisions')"><span class="ic">🧭</span>مركز اتخاذ القرارات</a></li>
       <li data-perm="support"><a class="nav-a" data-page="chats" onclick="SuperAdmin.navigate('chats')"><span class="ic">💬</span>الدردشات <span class="badge-count" id="sa-chats-badge" style="display:none;">0</span></a></li>
       <li data-perm="support"><a class="nav-a" data-page="tickets" onclick="SuperAdmin.navigate('tickets')"><span class="ic">🎫</span>التذاكر <span class="badge-count" id="sa-tickets-badge" style="display:none;">0</span></a></li>
       <li data-perm="settings"><a class="nav-a" data-page="links" onclick="SuperAdmin.navigate('links')"><span class="ic">🎨</span>المظهر والروابط</a></li>
