@@ -3835,7 +3835,10 @@ window.Chat = Chat;
 const Tickets = {};
 const TICKET_STATUS_CLASS = {'مفتوحة':'status-pending', 'قيد المعالجة':'status-trial', 'مغلقة':'status-active', 'ملغاة':'status-expired'};
 function ticketStatusPill(status){ return `<span class="pill ${TICKET_STATUS_CLASS[status]||'status-pending'}">${esc(status||'مفتوحة')}</span>`; }
-Views.tickets = function(){ Tickets.render(); };
+Views.tickets = function(){
+  Tickets.render();
+  markChatRead((DB.tickets||[]).filter(t=>t.readByChurch===false), 'readByChurch', 'tickets');
+};
 Tickets.render = function(){
   const list = DB.tickets||[];
   $content().innerHTML = `
