@@ -23,6 +23,14 @@
   <button id="announcement-close" onclick="App.dismissAnnouncement()" title="إغلاق مؤقت">✕</button>
 </div>
 
+<div id="maintenance-screen" style="display:none; min-height:100vh; align-items:center; justify-content:center; flex-direction:column; text-align:center; background:var(--navy); color:#fff; padding:20px;">
+  <div style="font-size:56px; margin-bottom:16px;">🚧</div>
+  <h1 style="font-size:24px; margin:0 0 14px;">المتجر مغلق مؤقتًا</h1>
+  <p style="opacity:.85; margin:0 0 10px;">🙏 بنرجعلكم قريب، شكرًا لصبركم</p>
+  <p id="maintenance-return-date" style="opacity:.85; margin:0 0 26px;"></p>
+  <button class="btn btn-gold" onclick="App.showAdminLoginModal()">🔒 دخول الأدمن</button>
+</div>
+
 <div id="login-screen">
   <div class="login-card">
     <p class="brand">نظام إدارة مدارس الأحد</p>
@@ -183,12 +191,18 @@
     <div id="sa-topbar">
       <button class="hamburger-btn" onclick="UI.openSaSidebar()">☰</button>
       <div class="page-title" id="sa-page-title">الكنايس</div>
+      <div class="search-box no-print">
+        <input id="sa-global-search" placeholder="بحث بالكنيسة، رقم التذكرة، صفحة..." oninput="SuperAdmin.globalSearch(this.value)" onblur="setTimeout(()=>document.getElementById('sa-search-results').style.display='none',150)">
+        <div id="sa-search-results"></div>
+      </div>
     </div>
     <div id="sa-content"></div>
   </div>
 </div>
 
-<div class="modal-backdrop" id="modal-backdrop">
+<div id="offline-badge" style="display:none; position:fixed; bottom:16px; left:16px; z-index:300; background:#33383D; color:#fff; padding:8px 16px; border-radius:99px; font-size:12.5px; box-shadow:0 6px 16px rgba(0,0,0,.25);">📴 غير متصل بالإنترنت — التغييرات هتتزامن تلقائيًا لما النت يرجع</div>
+
+<div class="modal-backdrop" id="modal-backdrop" onclick="if(event.target===this) UI.closeModal()">
   <div class="modal" id="modal-box">
     <div class="modal-head">
       <h3 id="modal-title">—</h3>

@@ -155,6 +155,13 @@ async function shareChatImage(url){
 }
 window.previewChatImage = previewChatImage;
 window.shareChatImage = shareChatImage;
+/* معاينة أي صورة رمزية (مخدوم/خادم/مستخدم) بالضغط عليها — بيانات الصورة فى data-photo لتفادي مشاكل تهريب النص */
+function previewAvatarClick(e){
+  e.stopPropagation();
+  const src = e.currentTarget.getAttribute('data-photo');
+  if(src) UI.previewImage(src);
+}
+window.previewAvatarClick = previewAvatarClick;
 window.Scanner = Scanner;
 /* هذه الدوال بتتنادى من داخل onclick/onchange/oninput فى الـ HTML مباشرة، وبما إن app.js
    شغّال كـ ES module فكل الدوال بتبقى محجوبة جوه نطاق الملف ومش متاحة عالميًا تلقائيًا —
@@ -163,6 +170,7 @@ window.mpOnStageChange = mpOnStageChange;
 window.mpOnGradeChange = mpOnGradeChange;
 window.mpRenderResults = mpRenderResults;
 window.mpSelect = mpSelect;
+window.mpClear = mpClear;
 window.mpSelectByCode = mpSelectByCode;
 window.handlePhotoSelect = handlePhotoSelect;
 window.clearPhotoField = clearPhotoField;
@@ -180,7 +188,10 @@ function memberPickerHtml(fieldId, selectedId){
       <button type="button" class="btn btn-ghost btn-sm" onclick="Scanner.open(v=>mpSelectByCode('${fieldId}', v))">📷</button>
     </div>
     <input type="hidden" id="${fieldId}" value="${selectedId||''}">
-    <div id="${fieldId}-selected" class="muted" style="margin-bottom:6px;">${sel? '✅ المختار: '+esc(sel.name) : 'اكتب اسم/كود أو اختار مرحلة للبحث'}</div>
+    <div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
+      <span id="${fieldId}-selected" class="muted">${sel? '✅ المختار: '+esc(sel.name) : 'اكتب اسم/كود أو اختار مرحلة للبحث'}</span>
+      ${selectedId? `<a style="cursor:pointer; color:var(--absent); font-size:12px; font-weight:700;" onclick="mpClear('${fieldId}')">✖ إلغاء التحديد</a>` : ''}
+    </div>
     <div id="${fieldId}-results" style="max-height:170px; overflow:auto; border:1px solid var(--line); border-radius:8px;"></div>
   </div>`;
 }
@@ -215,9 +226,15 @@ function mpRenderResults(fieldId){
 function mpSelect(fieldId, memberId){
   const m = byId(DB.members, memberId);
   document.getElementById(fieldId).value = memberId;
-  document.getElementById(fieldId+'-selected').innerHTML = '✅ المختار: '+esc(m?m.name:'');
+  const wrap = document.getElementById(fieldId+'-selected').parentElement;
+  wrap.innerHTML = `<span id="${fieldId}-selected" class="muted">✅ المختار: ${esc(m?m.name:'')}</span><a style="cursor:pointer; color:var(--absent); font-size:12px; font-weight:700;" onclick="mpClear('${fieldId}')">✖ إلغاء التحديد</a>`;
   document.getElementById(fieldId+'-results').innerHTML = '';
   document.getElementById(fieldId+'-search').value = '';
+}
+function mpClear(fieldId){
+  document.getElementById(fieldId).value = '';
+  const wrap = document.getElementById(fieldId+'-selected').parentElement;
+  wrap.innerHTML = `<span id="${fieldId}-selected" class="muted">اكتب اسم/كود أو اختار مرحلة للبحث</span>`;
 }
 function mpSelectByCode(fieldId, code){
   const m = DB.members.find(x=>(x.code||'').trim()===code.trim());
@@ -252,6 +269,8 @@ try{ enableIndexedDbPersistence(dbFire); }catch(e){ /* غير مدعوم في ب
 
 /* حالة تعدد الكنايس (Multi-tenant) */
 let CURRENT_CHURCH_ID = null;
+let CHURCH_ACCESS_LOCKED = false; // true لو اشتراك الكنيسة منتهي — بيسمح بس بالفوترة/الدردشة/التذاكر
+const CHURCH_LOCKED_ALLOWED_PAGES = ['billing','chat','tickets'];
 let CURRENT_CHURCH = null;
 let REGISTERING = false; // true أثناء تنفيذ عملية تسجيل كنيسة جديدة (لتجاهل onAuthStateChanged المؤقت)
 
@@ -302,7 +321,19 @@ function attachListeners(onReady){
 
   // متابعة حالة اشتراك الكنيسة نفسها لحظيًا (عشان الشاشة تتحدث فور موافقة/تفعيل الإدارة)
   const unsubChurch = onSnapshot(doc(dbFire,'churches',CURRENT_CHURCH_ID), d=>{
-    if(d.exists()) CURRENT_CHURCH = d.data();
+    if(!d.exists()) return;
+    CURRENT_CHURCH = d.data();
+    const now = Date.now();
+    const isExempt = CURRENT_CHURCH.status === 'exempt';
+    const trialValid = CURRENT_CHURCH.status==='trial' && CURRENT_CHURCH.trialEndsAt && new Date(CURRENT_CHURCH.trialEndsAt).getTime() > now;
+    const activeValid = CURRENT_CHURCH.status==='active' && CURRENT_CHURCH.activeUntil && new Date(CURRENT_CHURCH.activeUntil).getTime() > now;
+    const wasLocked = CHURCH_ACCESS_LOCKED;
+    CHURCH_ACCESS_LOCKED = !isExempt && !trialValid && !activeValid;
+    if(wasLocked !== CHURCH_ACCESS_LOCKED){
+      buildNav();
+      if(!CHURCH_ACCESS_LOCKED) toast('🎉 تم تفعيل الاشتراك — كل صفحات النظام بقت متاحة تاني');
+      if(CURRENT_PAGE==='billing') renderCurrent();
+    }
   }, err=>console.error(err));
   unsubscribers.push(unsubChurch);
 
@@ -351,6 +382,13 @@ function attachListeners(onReady){
     if(CURRENT_PAGE==='billing') Views.billing();
   }, err=>console.error(err));
   unsubscribers.push(unsubPlans);
+
+  // حالة الجلسة النشطة وطابور الانتظار فى الدردشة
+  const unsubChatSession = onSnapshot(doc(dbFire,'platformConfig','chatSession'), d=>{
+    CHAT_SESSION = d.exists() ? d.data() : {activeChurchId:null, queue:[]};
+    if(CURRENT_PAGE==='chat') Chat.renderQueueBanner();
+  }, err=>console.error(err));
+  unsubscribers.push(unsubChatSession);
 }
 
 function renderCurrent(){
@@ -399,11 +437,9 @@ async function fsDeleteWhere(col, field, value){
   await Promise.all(snap.docs.map(d=>deleteDoc(d.ref)));
 }
 async function log(action, details){
+  if(IMPERSONATING) return; // المالك داخل مؤقتًا على لوحة كنيسة — لا يُسجَّل أي إجراء له فى سجل الكنيسة إطلاقًا (خصوصية الطرفين)
   try{
-    // لو المالك داخل مؤقتًا على لوحة كنيسة (Impersonation)، يتسجّل باسم "الإدارة" بس
-    // من غير اسمه الشخصي، حفاظًا على خصوصية الطرفين — مع إبقاء وجود الإجراء نفسه واضح للكنيسة.
-    const userLabel = IMPERSONATING ? 'الإدارة' : (CURRENT_USER ? CURRENT_USER.name : '—');
-    const payload = { date: new Date().toISOString(), user: userLabel, action, details: details||'' };
+    const payload = { date: new Date().toISOString(), user: CURRENT_USER ? CURRENT_USER.name : '—', action, details: details||'' };
     if(CURRENT_CHURCH_ID) payload.churchId = CURRENT_CHURCH_ID;
     await addDoc(collection(dbFire,'auditLog'), payload);
   }catch(e){ console.error('audit log failed', e); }
@@ -441,7 +477,7 @@ async function tagLegacyDataWithChurch(churchId){
 
 /* ---------------- شاشات المصادقة ---------------- */
 function hideAllAuthScreens(){
-  ['login-screen','register-screen','pending-screen','locked-screen','forgot-screen','join-screen'].forEach(id=>{
+  ['login-screen','register-screen','pending-screen','locked-screen','forgot-screen','join-screen','maintenance-screen'].forEach(id=>{
     document.getElementById(id).style.display='none';
   });
   document.getElementById('app').style.display='none';
@@ -619,7 +655,8 @@ onAuthStateChanged(auth, async (fbUser) => {
   detachListeners();
   if(!fbUser){
     console.log('[AUTH] no fbUser -> showing login screen');
-    CURRENT_USER = null; CURRENT_CHURCH_ID = null; CURRENT_CHURCH = null;
+    CURRENT_USER = null; CURRENT_CHURCH_ID = null; CURRENT_CHURCH = null; CHURCH_ACCESS_LOCKED = false;
+    if(enforceMaintenanceGate()) return;
     hideAllAuthScreens();
     document.getElementById('login-screen').style.display='flex';
     return;
@@ -670,6 +707,9 @@ onAuthStateChanged(auth, async (fbUser) => {
 
     CURRENT_USER = {uid: fbUser.uid, email: fbUser.email, ...userData};
     console.log('[AUTH] step 5: CURRENT_USER set. role =', CURRENT_USER.role);
+
+    // بوابة وضع الصيانة: أي حد غير المالك/الأدمن الفرعي يتوقف هنا لو الصيانة مفعّلة
+    if(enforceMaintenanceGate()) return;
 
     /* ----- مالك النظام: لوحة منفصلة تمامًا ----- */
     if(CURRENT_USER.role === 'superadmin'){
@@ -728,10 +768,8 @@ onAuthStateChanged(auth, async (fbUser) => {
     const isExempt = church.status === 'exempt';
     const trialValid = church.status==='trial' && trialEnd > now;
     const activeValid = church.status==='active' && activeEnd > now;
-    if(!isExempt && !trialValid && !activeValid){
-      showLockedScreen('انتهت مدة اشتراك كنيسة "'+church.name+'" في النظام. للتجديد، تواصل مع الإدارة.');
-      await signOut(auth); return;
-    }
+    // بدل ما نقفل الدخول بالكامل، نسمح بالدخول لكن نقفل كل الصفحات ماعدا الفوترة/الدردشة/التذاكر
+    CHURCH_ACCESS_LOCKED = !isExempt && !trialValid && !activeValid;
 
     /* ----- تمام: دخول عادي للنظام ----- */
     console.log('[AUTH] step 9: normal church login, showing app');
@@ -741,7 +779,7 @@ onAuthStateChanged(auth, async (fbUser) => {
     document.getElementById('current-user-role').textContent = ROLE_LABELS[CURRENT_USER.role]||CURRENT_USER.role;
     buildNav();
     DB.users = [CURRENT_USER];
-    attachListeners(()=>{ App.navigate('dashboard'); });
+    attachListeners(()=>{ App.navigate(CHURCH_ACCESS_LOCKED ? 'billing' : 'dashboard'); });
     await log('تسجيل دخول', CURRENT_USER.name);
     console.log('[AUTH] DONE - church login flow complete');
   }catch(e){
@@ -762,6 +800,7 @@ let SA_METHODS = [];
 let SA_PROOFS = [];
 let SA_CHAT_CHURCH_ID = null;
 let SA_CHAT_MESSAGES = [];
+let SA_CHAT_SESSION = {activeChurchId:null, queue:[]};
 let SA_UNREAD_BY_CHURCH = {}; // churchId -> عدد رسائل الكنيسة اللي لسه المالك مقراهاش
 let SA_TICKETS = [];
 let SA_TICKET_FILTERS = {type:'', status:'', search:'', from:'', to:''};
@@ -827,10 +866,20 @@ SuperAdmin.boot = function(){
     if(SA_PAGE==='chats' && !SA_CHAT_CHURCH_ID) SuperAdmin.render();
   }, err=>console.error(err));
 
+  // حالة الجلسة النشطة وطابور الانتظار فى الدردشة
+  onSnapshot(doc(dbFire,'platformConfig','chatSession'), d=>{
+    SA_CHAT_SESSION = d.exists() ? d.data() : {activeChurchId:null, queue:[]};
+    if(SA_PAGE==='chats' && !SA_CHAT_CHURCH_ID) SuperAdmin.render();
+  }, err=>console.error(err));
+
   // أنواع التذاكر المتاحة (يديرها المالك)
   if(saTicketTypesUnsub) saTicketTypesUnsub();
   saTicketTypesUnsub = onSnapshot(doc(dbFire,'ticketTypes','main'), d=>{
     TICKET_TYPES = d.exists() ? (d.data().types||[]) : [];
+    if(!TICKET_TYPES.length && !SA_TICKET_TYPES_SEED_ATTEMPTED){
+      SA_TICKET_TYPES_SEED_ATTEMPTED = true; // مرة واحدة بس طول الجلسة، عشان مايحصلش تكرار كتابة/فليكر فى الواجهة
+      SuperAdmin.seedDefaultTicketTypes();
+    }
     if(SA_PAGE==='tickets') SuperAdmin.render();
   }, err=>console.error(err));
 
@@ -1369,12 +1418,37 @@ SuperAdmin.rejectProof = async function(proofId){
 SuperAdmin.renderChats = function(el){
   if(!SA_CHAT_CHURCH_ID){
     const sorted = [...SA_CHURCHES].sort((a,b)=> (SA_UNREAD_BY_CHURCH[b.id]?1:0) - (SA_UNREAD_BY_CHURCH[a.id]?1:0));
-    el.innerHTML = `<div class="section-head"><h2>اختر كنيسة للدردشة معها</h2></div>
+    const activeChurch = SA_CHAT_SESSION.activeChurchId ? byId(SA_CHURCHES, SA_CHAT_SESSION.activeChurchId) : null;
+    const queue = (SA_CHAT_SESSION.queue||[]).map(id=>byId(SA_CHURCHES,id)).filter(Boolean);
+    el.innerHTML = `
+      <div class="card card-pad" style="margin-bottom:16px;">
+        ${activeChurch ? `
+          <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+            <span>🟢 بيتكلم معاك دلوقتي: <b>${esc(activeChurch.name)}</b></span>
+            <div>
+              <button class="btn btn-ghost btn-sm" onclick="SuperAdmin.openChat('${activeChurch.id}')">فتح المحادثة</button>
+              <button class="btn btn-danger btn-sm" onclick="SuperAdmin.endActiveSession()">🔴 إنهاء الجلسة الحالية</button>
+            </div>
+          </div>
+        ` : `<p class="muted" style="margin:0;">مفيش جلسة نشطة دلوقتي — ابدأ محادثة مع أي كنيسة من القائمة تحت.</p>`}
+        ${queue.length ? `
+          <div style="margin-top:14px; border-top:1px solid var(--line); padding-top:12px;">
+            <b style="font-size:13px;">⏳ قائمة الانتظار (${queue.length})</b>
+            <div style="margin-top:8px; display:flex; flex-direction:column; gap:6px;">
+              ${queue.map((c,i)=>`<div style="display:flex; justify-content:space-between; align-items:center;">
+                <span>${i+1}. ${esc(c.name)}</span>
+                <button class="btn btn-ghost btn-sm" onclick="SuperAdmin.openChat('${c.id}')">ابدأ المحادثة معاه</button>
+              </div>`).join('')}
+            </div>
+          </div>
+        ` : ''}
+      </div>
+      <div class="section-head"><h2>كل الكنايس</h2></div>
       <div class="info-card-grid">
         ${sorted.length ? sorted.map(c=>{
           const unread = SA_UNREAD_BY_CHURCH[c.id]||0;
           return `<div class="church-card" style="position:relative;" onclick="SuperAdmin.openChat('${c.id}','${esc(c.name)}')">
-            <h3>${esc(c.name)}${unread? ` <span class="badge-count" style="display:inline-block; margin-right:6px;">${unread}</span>`:''}</h3>
+            <h3>${esc(c.name)}${unread? ` <span class="badge-count" style="display:inline-block; margin-right:6px;">${unread}</span>`:''}${SA_CHAT_SESSION.activeChurchId===c.id?' 🟢':''}</h3>
           </div>`;
         }).join('')
           : `<p class="muted">لا توجد كنايس مسجلة بعد.</p>`}
@@ -1411,6 +1485,7 @@ SuperAdmin.clearChatFile = function(){
 };
 SuperAdmin.openChat = function(churchId){
   SA_CHAT_CHURCH_ID = churchId;
+  SuperAdmin.claimActiveSession(churchId);
   if(saChatUnsub) saChatUnsub();
   saChatUnsub = onSnapshot(query(collection(dbFire,'chatMessages'), where('churchId','==',churchId)), snap=>{
     SA_CHAT_MESSAGES = snap.docs.map(d=>({id:d.id, ...d.data()})).sort((a,b)=>(a.createdAt||0)-(b.createdAt||0));
@@ -1420,6 +1495,35 @@ SuperAdmin.openChat = function(churchId){
     }
   }, err=>console.error(err));
   SuperAdmin.render();
+};
+/* يخلي كنيسة معينة هي "النشطة" دلوقتي. لو فيه كنيسة نشطة تانية قبل كده، ترجع آخر واحدة
+   فى طابور الانتظار من غير ما تتبعتلها رسالة إغلاق (زي ما اتفقنا: التبديل السريع مش إنهاء فعلي). */
+SuperAdmin.claimActiveSession = async function(churchId){
+  try{
+    const ref = doc(dbFire,'platformConfig','chatSession');
+    const snap = await getDoc(ref);
+    const s = snap.exists() ? snap.data() : {activeChurchId:null, queue:[]};
+    if(s.activeChurchId === churchId) return; // بالفعل هي النشطة
+    let queue = (s.queue||[]).filter(id=>id!==churchId);
+    if(s.activeChurchId && s.activeChurchId!==churchId) queue.push(s.activeChurchId);
+    await setDoc(ref, {activeChurchId: churchId, queue}, {merge:true});
+  }catch(e){ console.error('claim session failed', e); }
+};
+/* إنهاء الجلسة الحالية فعليًا: رسالة ختامية للعميل + ترقية أول واحد فى الطابور تلقائيًا */
+SuperAdmin.endActiveSession = async function(){
+  const activeId = SA_CHAT_SESSION.activeChurchId;
+  if(!activeId) return;
+  if(!confirm('تأكيد إنهاء الجلسة الحالية؟')) return;
+  try{
+    await fsAddRaw('chatMessages', {
+      churchId: activeId, senderRole:'superadmin', senderName: CURRENT_USER.name,
+      text: '✅ تم إنهاء الجلسة الحالية، شكرًا لتواصلك معنا.', createdAt: Date.now(), readBySA:true, readByChurch:false,
+    });
+    const queue = [...(SA_CHAT_SESSION.queue||[])];
+    const next = queue.shift() || null;
+    await setDoc(doc(dbFire,'platformConfig','chatSession'), {activeChurchId: next, queue}, {merge:true});
+    toast('تم إنهاء الجلسة');
+  }catch(e){ console.error(e); toast('تعذر الإنهاء: '+e.message); }
 };
 SuperAdmin.closeChat = function(){
   SA_CHAT_CHURCH_ID = null;
@@ -1472,6 +1576,7 @@ const DEFAULT_TICKET_TYPES = [
   'شكوى أخرى',
 ];
 let SA_SEEDING_TICKET_TYPES = false;
+let SA_TICKET_TYPES_SEED_ATTEMPTED = false;
 SuperAdmin.seedDefaultTicketTypes = async function(){
   if(SA_SEEDING_TICKET_TYPES) return;
   SA_SEEDING_TICKET_TYPES = true;
@@ -1481,7 +1586,6 @@ SuperAdmin.seedDefaultTicketTypes = async function(){
 };
 SuperAdmin.renderTickets = function(el){
   const types = TICKET_TYPES;
-  if(!types.length && !SA_SEEDING_TICKET_TYPES) SuperAdmin.seedDefaultTicketTypes();
   let filtered = SA_TICKETS.slice();
   if(SA_TICKET_FILTERS.type) filtered = filtered.filter(t=>t.type===SA_TICKET_FILTERS.type);
   if(SA_TICKET_FILTERS.status) filtered = filtered.filter(t=>t.status===SA_TICKET_FILTERS.status);
@@ -1607,7 +1711,18 @@ SuperAdmin.saveTicketUpdate = async function(id){
 SuperAdmin.renderLinks = function(el){
   const currentTheme = SA_PUBLIC_CONFIG.theme || 'classic';
   const ann = SA_PUBLIC_CONFIG.announcement || {};
+  const maint = SA_PUBLIC_CONFIG.maintenance || {};
   el.innerHTML = `
+    <div class="card card-pad" style="margin-bottom:16px; ${maint.enabled?'border-color:#E7C6BE; background:var(--absent-bg);':''}">
+      <b style="font-size:13px; display:block; margin-bottom:8px;">🚧 وضع الصيانة (يقفل الموقع مؤقتًا عن كل الكنايس أثناء التطوير)</b>
+      <label style="display:flex; align-items:center; gap:8px; font-weight:400; font-size:13px; margin-bottom:10px;">
+        <input type="checkbox" id="maint-enabled" ${maint.enabled?'checked':''}> تفعيل وضع الصيانة الآن
+      </label>
+      <div class="field"><label>موعد الرجوع المتوقع (اختياري)</label><input type="date" id="maint-return" value="${maint.expectedReturn||''}"></div>
+      <button class="btn btn-primary btn-sm" onclick="SuperAdmin.saveMaintenance()">حفظ</button>
+      <p class="muted" style="margin-top:6px;">إنت (والأدمن الفرعي) هتقدروا تدخلوا عادي من زرار "دخول الأدمن" اللي هيظهر فى شاشة الصيانة.</p>
+    </div>
+
     <div class="card card-pad" style="margin-bottom:16px;">
       <b style="font-size:13px; display:block; margin-bottom:8px;">📢 شريط إعلان/تنويه متحرك (يظهر لكل الزوار والكنايس أعلى الصفحة)</b>
       <label style="display:flex; align-items:center; gap:8px; font-weight:400; font-size:13px; margin-bottom:10px;">
@@ -1639,7 +1754,6 @@ SuperAdmin.renderLinks = function(el){
         <div class="field"><label>فيسبوك</label><input id="pc-facebook" value="${esc(SA_PUBLIC_CONFIG.contacts?.facebook||'')}" placeholder="https://facebook.com/..."></div>
         <div class="field"><label>إنستجرام</label><input id="pc-instagram" value="${esc(SA_PUBLIC_CONFIG.contacts?.instagram||'')}" placeholder="https://instagram.com/..."></div>
         <div class="field"><label>تليجرام</label><input id="pc-telegram" value="${esc(SA_PUBLIC_CONFIG.contacts?.telegram||'')}" placeholder="https://t.me/..."></div>
-        <div class="field"><label>إنستجرام</label><input id="pc-instagram" value="${esc(SA_PUBLIC_CONFIG.contacts?.instagram||'')}" placeholder="https://instagram.com/..."></div>
         <div class="field"><label>البريد الإلكتروني</label><input id="pc-email" value="${esc(SA_PUBLIC_CONFIG.contacts?.email||'')}" placeholder="support@example.com"></div>
         <div class="field"><label>رقم الاتصال المباشر</label><input id="pc-phone" value="${esc(SA_PUBLIC_CONFIG.contacts?.phone||'')}" placeholder="0100xxxxxxx"></div>
       </div>
@@ -1674,6 +1788,15 @@ SuperAdmin.renderLinks = function(el){
     </div>
   `;
 };
+SuperAdmin.saveMaintenance = async function(){
+  const enabled = document.getElementById('maint-enabled').checked;
+  const expectedReturn = document.getElementById('maint-return').value;
+  try{
+    await setDoc(doc(dbFire,'platformConfig','public'), { maintenance: {enabled, expectedReturn} }, {merge:true});
+    await saLog(enabled?'تفعيل وضع الصيانة':'إلغاء وضع الصيانة', expectedReturn||'');
+    toast('تم الحفظ');
+  }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
+};
 SuperAdmin.saveAnnouncement = async function(){
   const enabled = document.getElementById('ann-enabled').checked;
   const text = document.getElementById('ann-text').value.trim();
@@ -1690,7 +1813,6 @@ SuperAdmin.savePublicContact = async function(){
   const contacts = {
     whatsapp: document.getElementById('pc-whatsapp').value.trim(),
     facebook: document.getElementById('pc-facebook').value.trim(),
-    instagram: document.getElementById('pc-instagram').value.trim(),
     telegram: document.getElementById('pc-telegram').value.trim(),
     instagram: document.getElementById('pc-instagram').value.trim(),
     email: document.getElementById('pc-email').value.trim(),
@@ -2068,6 +2190,44 @@ SuperAdmin.sendDecisionAlert = async function(churchId, tplKey){
   }catch(e){ console.error(e); toast('تعذر الإرسال: '+e.message); }
 };
 
+const SA_SEARCH_INDEX = [
+  {label:'المظهر وألوان النظام', page:'links', keywords:'ثيم لون شكل تصميم كلاسيكي أزرق نبيتي'},
+  {label:'شريط الإعلان المتحرك', page:'links', keywords:'اعلان تنويه شريط اخبار'},
+  {label:'قنوات تواصل معنا (واتساب/فيسبوك/انستجرام/تليجرام)', page:'links', keywords:'تواصل واتساب فيسبوك انستجرام تليجرام ايميل تليفون'},
+  {label:'وضع الصيانة', page:'links', keywords:'صيانة اغلاق مؤقت تطوير تحديث'},
+  {label:'روابط إدارية سريعة', page:'links', keywords:'رابط جيتهاب فايربيز github firebase'},
+  {label:'خطط الاشتراك', page:'plans', keywords:'باقة خطة سعر اشتراك'},
+  {label:'أكواد الخصم والأيام الإضافية', page:'plans', keywords:'كود خصم كوبون أيام إضافية'},
+  {label:'الأدمن الفرعي والصلاحيات', page:'subadmins', keywords:'صلاحية دعوة فرعي مشرف'},
+  {label:'مركز اتخاذ القرارات', page:'decisions', keywords:'تنبيه انتهى اشتراك تجربة غير نشطة حذف'},
+  {label:'سجل نشاط المالك', page:'activity', keywords:'سجل نشاط حركات'},
+  {label:'التقرير الشامل والإحصائيات', page:'report', keywords:'تقرير احصائيات كروت'},
+  {label:'أنواع التذاكر والشكاوى', page:'tickets', keywords:'نوع شكوى تذكرة'},
+  {label:'مرفقات طرق الدفع', page:'methods', keywords:'مرفق صورة qr رقم حساب'},
+];
+SuperAdmin.globalSearch = function(q){
+  const box = document.getElementById('sa-search-results');
+  q = q.trim().toLowerCase();
+  if(!q){ box.style.display='none'; return; }
+  const pages = [
+    {id:'churches',label:'الكنايس'},{id:'requests',label:'طلبات جديدة'},{id:'payments',label:'مراجعة المدفوعات'},
+    {id:'methods',label:'طرق الدفع'},{id:'plans',label:'الخطط والعروض'},{id:'report',label:'تقرير شامل'},
+    {id:'decisions',label:'مركز اتخاذ القرارات'},{id:'chats',label:'الدردشات'},{id:'tickets',label:'التذاكر'},
+    {id:'links',label:'المظهر والروابط'},{id:'activity',label:'سجل النشاط'},{id:'subadmins',label:'الأدمن الفرعي'},
+  ];
+  const results = [];
+  pages.forEach(p=>{ if(p.label.toLowerCase().includes(q)) results.push({label:p.label, sub:'صفحة', action:`SuperAdmin.navigate('${p.id}')`}); });
+  SA_SEARCH_INDEX.forEach(it=>{
+    if(it.label.toLowerCase().includes(q) || it.keywords.toLowerCase().includes(q))
+      results.push({label:it.label, sub:'ميزة/إعداد', action:`SuperAdmin.navigate('${it.page}')`});
+  });
+  SA_CHURCHES.forEach(c=>{ if((c.name||'').toLowerCase().includes(q)) results.push({label:c.name, sub:'كنيسة', action:`SuperAdmin.navigate('churches'); setTimeout(()=>SuperAdmin.openChurch('${c.id}'),50)`}); });
+  SA_TICKETS.forEach(t=>{ if((t.ticketNo||'').toLowerCase().includes(q) || (t.title||'').toLowerCase().includes(q)) results.push({label:t.ticketNo+' — '+t.title, sub:'تذكرة', action:`SuperAdmin.navigate('tickets'); setTimeout(()=>SuperAdmin.openTicketDetail('${t.id}'),50)`}); });
+  if(!results.length){ box.innerHTML = '<div class="sr-item muted">لا توجد نتائج</div>'; box.style.display='block'; return; }
+  box.innerHTML = results.slice(0,10).map(r=>`<div class="sr-item" onclick="${r.action}">${esc(r.label)}<small>${r.sub}</small></div>`).join('');
+  box.style.display = 'block';
+};
+
 window.SuperAdmin = SuperAdmin;
 
 /* ---------------- Nav ---------------- */
@@ -2093,7 +2253,10 @@ function buildNav(){
   const nav = document.getElementById('nav');
   nav.innerHTML = NAV_ITEMS
     .filter(it=> !it.adminOnly || (CURRENT_USER && (CURRENT_USER.role==='admin' || IMPERSONATING)))
-    .map(it=>`<li><a class="nav-a" data-page="${it.id}" onclick="App.navigate('${it.id}')"><span class="ic">${it.ic}</span>${it.label}${it.badge?` <span class="badge-count" id="nav-badge-${it.id}" style="display:none;">0</span>`:''}</a></li>`).join('');
+    .map(it=>{
+      const locked = CHURCH_ACCESS_LOCKED && !CHURCH_LOCKED_ALLOWED_PAGES.includes(it.id);
+      return `<li><a class="nav-a${locked?' nav-locked':''}" data-page="${it.id}" onclick="App.navigate('${it.id}')"><span class="ic">${it.ic}</span>${it.label}${locked?' 🔒':''}${it.badge?` <span class="badge-count" id="nav-badge-${it.id}" style="display:none;">0</span>`:''}</a></li>`;
+    }).join('');
 }
 /* تحديث عدد رسائل غير مقروءة (أو أي عدّاد) جنب عنصر في القائمة الجانبية للكنيسة */
 App.updateNavBadge = function(id, count){
@@ -2103,6 +2266,10 @@ App.updateNavBadge = function(id, count){
   el.style.display = count>0 ? 'inline-block' : 'none';
 };
 App.navigate = function(page, param){
+  if(CHURCH_ACCESS_LOCKED && !CHURCH_LOCKED_ALLOWED_PAGES.includes(page)){
+    toast('انتهى اشتراك الكنيسة — الصفحة دي مش متاحة حاليًا. جدّد الاشتراك من "الاشتراك والدفع".');
+    page = 'billing'; param = undefined;
+  }
   stopScannerIfActive();
   CURRENT_PAGE = page; CURRENT_PARAM = param;
   UI.closeSidebar();
@@ -2366,7 +2533,7 @@ Views.members = function(){
       return DB.members.filter(m=> (!stageF||m.stageId===stageF) && (!gradeF||m.gradeId===gradeF) && (!classF||m.classId===classF) );
     },
     columns:[
-      {h:'الاسم', render:m=>`<div class="name-cell"><span class="avatar">${m.photo?`<img src="${m.photo}">`:initials(m.name)}</span><span class="nm" onclick="App.navigate('memberProfile','${m.id}')">${esc(m.name)}</span></div>`},
+      {h:'الاسم', render:m=>`<div class="name-cell"><span class="avatar">${m.photo?`<img src="${m.photo}" data-photo="${m.photo}" onclick="previewAvatarClick(event)" style="cursor:zoom-in;">`:initials(m.name)}</span><span class="nm" onclick="App.navigate('memberProfile','${m.id}')">${esc(m.name)}</span></div>`},
       {h:'الكود', key:'code'},
       {h:'الجنس', key:'gender'},
       {h:'المرحلة', render:m=>esc(nameOf(DB.stages,m.stageId))},
@@ -2461,7 +2628,7 @@ Views.memberProfile = function(id){
     <button class="btn btn-ghost btn-sm no-print" style="margin-bottom:14px;" onclick="App.navigate('members')">→ رجوع للمخدومين</button>
     <div class="card card-pad">
       <div class="profile-head">
-        <span class="avatar">${m.photo?`<img src="${m.photo}">`:initials(m.name)}</span>
+        <span class="avatar">${m.photo?`<img src="${m.photo}" data-photo="${m.photo}" onclick="previewAvatarClick(event)" style="cursor:zoom-in;">`:initials(m.name)}</span>
         <div style="flex:1;">
           <h2>${esc(m.name)} <span style="font-size:13px;color:var(--ink-soft);font-weight:500;">#${esc(m.code)}</span></h2>
           <div class="muted">${esc(nameOf(DB.stages,m.stageId))} — ${esc(nameOf(DB.grades,m.gradeId))} — ${esc(nameOf(DB.classes,m.classId))} · ${esc(m.gender||'')} · السن ${age(m.birthDate)} · ${statusPill(m.status)}</div>
@@ -2533,7 +2700,7 @@ Views.servants = function(){
     searchFields:['name','code','phone'],
     rows: ()=>DB.servants,
     columns:[
-      {h:'الاسم', render:s=>`<div class="name-cell"><span class="avatar">${s.photo?`<img src="${s.photo}">`:initials(s.name)}</span><span class="nm" onclick="Servants.viewProfile('${s.id}')">${esc(s.name)}</span></div>`},
+      {h:'الاسم', render:s=>`<div class="name-cell"><span class="avatar">${s.photo?`<img src="${s.photo}" data-photo="${s.photo}" onclick="previewAvatarClick(event)" style="cursor:zoom-in;">`:initials(s.name)}</span><span class="nm" onclick="Servants.viewProfile('${s.id}')">${esc(s.name)}</span></div>`},
       {h:'الكود', key:'code'},
       {h:'الجنس', key:'gender'},
       {h:'المرحلة', render:s=>esc(nameOf(DB.stages,s.stageId))},
@@ -3208,7 +3375,7 @@ Views.users = function(){
   `;
   const uRows = DB.users;
   document.getElementById('users-table-wrap').innerHTML = uRows.length ? `<table><thead><tr><th>الاسم</th><th>البريد الإلكتروني</th><th>الدور</th><th></th></tr></thead>
-    <tbody>${uRows.map(u=>`<tr><td class="name-cell"><span class="avatar">${u.photo?`<img src="${u.photo}">`:initials(u.name)}</span>${esc(u.name)}</td><td class="muted">${esc(u.email)}</td><td>${ROLE_LABELS[u.role]||u.role}</td>
+    <tbody>${uRows.map(u=>`<tr><td class="name-cell"><span class="avatar">${u.photo?`<img src="${u.photo}" data-photo="${u.photo}" onclick="previewAvatarClick(event)" style="cursor:zoom-in;">`:initials(u.name)}</span>${esc(u.name)}</td><td class="muted">${esc(u.email)}</td><td>${ROLE_LABELS[u.role]||u.role}</td>
       <td><div class="row-actions"><button class="btn btn-ghost btn-sm" onclick="UsersV.openForm('${u.id}')">تعديل الدور</button>${u.id!==CURRENT_USER.uid?`<button class="btn btn-danger btn-sm" onclick="UsersV.remove('${u.id}')">حذف</button>`:''}</div></td>
     </tr>`).join('')}</tbody></table>` : `<div class="empty-state">لا يوجد مستخدمون بعد</div>`;
 
@@ -3469,6 +3636,9 @@ Views.billing = function(){
   const canSubmit = CURRENT_USER.role==='admin';
   $content().innerHTML = `
     <div class="section-head"><h2>الاشتراك والدفع</h2></div>
+    ${CHURCH_ACCESS_LOCKED ? `<div class="card card-pad" style="margin-bottom:16px; background:var(--absent-bg); border-color:#E7C6BE;">
+      🔒 انتهى اشتراك الكنيسة، وتم قفل باقي صفحات النظام مؤقتًا. لسه متاح ليك هنا وفى "الدردشة مع الإدارة" و"الدعم الفني والشكاوى" بس. جدّد اشتراكك تحت وهيرجع كل حاجة تشتغل تلقائيًا فورًا.
+    </div>` : ''}
     <div class="card card-pad" style="margin-bottom:20px;">
       <div class="kv">
         <b>حالة كنيستكم</b><span class="church-status ${info.cls}">${info.label}</span>
@@ -3561,10 +3731,12 @@ Billing.submitProof = async function(){
 window.Billing = Billing;
 
 /* ---------- الدردشة مع الإدارة ---------- */
+let CHAT_SESSION = {activeChurchId:null, queue:[]};
 const Chat = {};
 Views.chat = function(){
   $content().innerHTML = `
     <div class="section-head"><h2>الدردشة مع الإدارة</h2></div>
+    <div id="chat-queue-banner"></div>
     <div class="card" style="display:flex; flex-direction:column; height:60vh;">
       <div id="chat-messages" style="flex:1; overflow-y:auto; padding:16px;"></div>
       <div style="display:flex; gap:8px; padding:12px; border-top:1px solid var(--line); align-items:center;">
@@ -3576,7 +3748,23 @@ Views.chat = function(){
     </div>
   `;
   Chat.renderMessages();
+  Chat.renderQueueBanner();
   markChatRead((DB.chatMessages||[]).filter(m=>m.senderRole==='superadmin' && m.readByChurch===false), 'readByChurch');
+};
+/* بانر "🕐 الأدمن مشغول، انت رقم X في الانتظار" — بيتحدث لحظيًا مع أي تغيير فى الطابور */
+Chat.renderQueueBanner = function(){
+  const box = document.getElementById('chat-queue-banner');
+  if(!box) return;
+  const s = CHAT_SESSION;
+  if(!s.activeChurchId || s.activeChurchId===CURRENT_CHURCH_ID){
+    box.innerHTML = '';
+    return;
+  }
+  const pos = (s.queue||[]).indexOf(CURRENT_CHURCH_ID);
+  const posLabel = pos>=0 ? (pos+1) : '—';
+  box.innerHTML = `<div class="card card-pad" style="background:#FBF6EC; border-color:#E9D3AE; margin-bottom:12px; font-size:13.5px;">
+    🕐 الأدمن بيتكلم مع عميل تاني حاليًا. إنت رقم <b>${posLabel}</b> في قائمة الانتظار، هيوصلك دورك قريب.
+  </div>`;
 };
 Chat.previewFile = function(){
   const file = document.getElementById('chat-file').files[0];
@@ -3617,6 +3805,7 @@ Chat.send = async function(){
   if(!text && !file) return;
   input.value='';
   try{
+    await Chat.ensureActiveOrQueued();
     const payload = {
       churchId: CURRENT_CHURCH_ID, senderRole: IMPERSONATING?'admin':CURRENT_USER.role, senderName: CURRENT_USER.name,
       text, createdAt: Date.now(), readBySA:false, readByChurch:true,
@@ -3625,6 +3814,20 @@ Chat.send = async function(){
     await fsAddRaw('chatMessages', payload);
     Chat.clearFile();
   }catch(e){ console.error(e); toast('تعذر إرسال الرسالة: '+e.message); }
+};
+/* نظام الجلسة النشطة/الطابور: أول عميل يبعت رسالة والأدمن فاضي بيبقى نشط تلقائيًا،
+   وأي عميل تاني بيتسجّل فى آخر الطابور (لو مش مسجّل فيه بالفعل) */
+Chat.ensureActiveOrQueued = async function(){
+  const ref = doc(dbFire,'platformConfig','chatSession');
+  try{
+    const snap = await getDoc(ref);
+    const s = snap.exists() ? snap.data() : {activeChurchId:null, queue:[]};
+    if(!s.activeChurchId){
+      await setDoc(ref, {activeChurchId: CURRENT_CHURCH_ID, queue: (s.queue||[]).filter(id=>id!==CURRENT_CHURCH_ID)}, {merge:true});
+    } else if(s.activeChurchId !== CURRENT_CHURCH_ID && !(s.queue||[]).includes(CURRENT_CHURCH_ID)){
+      await setDoc(ref, {queue: [...(s.queue||[]), CURRENT_CHURCH_ID]}, {merge:true});
+    }
+  }catch(e){ console.error('chat session update failed', e); } // مش حرج، الرسالة تتبعت عادي حتى لو فشل تحديث الطابور
 };
 window.Chat = Chat;
 
@@ -3650,7 +3853,14 @@ Tickets.render = function(){
     </div>` : `<p class="muted">لا توجد تذاكر بعد. لو عندك مشكلة أو شكوى، ابدأ تذكرة جديدة من الزرار اللي فوق.</p>`}
   `;
 };
-Tickets.openNewForm = function(){
+Tickets.openNewForm = async function(){
+  // نجيب أنواع التذاكر مباشرة لو لسه المستمع اللحظي مجابش البيانات (يمنع ظهور "عام" بس فى حالة فتح النافذة بسرعة)
+  if(!TICKET_TYPES.length){
+    try{
+      const d = await getDoc(doc(dbFire,'ticketTypes','main'));
+      if(d.exists()) TICKET_TYPES = d.data().types||[];
+    }catch(e){ console.error(e); }
+  }
   UI.openModal('تذكرة جديدة', `
     <div class="field"><label>نوع التذكرة</label>
       <select id="tk-type">${TICKET_TYPES.length ? TICKET_TYPES.map(t=>`<option value="${esc(t)}">${esc(t)}</option>`).join('') : `<option value="عام">عام</option>`}</select>
@@ -3709,11 +3919,39 @@ Tickets.cancel = async function(id){
 window.Tickets = Tickets;
 
 /* ---------- Global search ---------- */
+/* فهرس ثابت لكل ميزات/إعدادات النظام (مش بس بيانات المخدومين) — عشان البحث يوصل لأي حاجة فى أي صفحة */
+const CHURCH_SEARCH_INDEX = [
+  {label:'بيانات الكنيسة والاسم', page:'settings', keywords:'اسم الكنيسة بيانات وصف'},
+  {label:'أسماء الأنشطة الجاهزة', page:'settings', keywords:'اسم نشاط قوالب جاهزة اقتراحات'},
+  {label:'أنواع المتابعة', page:'settings', keywords:'نوع متابعة غياب سلوكي روحي دراسي'},
+  {label:'النسخ الاحتياطي واستيراد/تصدير البيانات', page:'backup', keywords:'نسخة احتياطية استيراد تصدير csv'},
+  {label:'المراحل والصفوف والفصول', page:'stages', keywords:'مرحلة صف دراسي فصل ابتدائي اعدادي ثانوي'},
+  {label:'تسجيل الحضور بالباركود/QR', page:'attendance', keywords:'حضور غياب باركود qr قراءة كاميرا'},
+  {label:'التقييمات', page:'evaluations', keywords:'تقييم درجة تقييم جديد'},
+  {label:'المتابعة الفردية', page:'followups', keywords:'متابعة فردية مشكلة سلوك'},
+  {label:'الأنشطة والفعاليات', page:'activities', keywords:'نشاط فعالية رحلة مسابقة مشاركين'},
+  {label:'مركز التقارير', page:'reports', keywords:'تقرير كشف حضور فردي إحصائيات'},
+  {label:'الاشتراك وطرق الدفع', page:'billing', keywords:'اشتراك دفع فاتورة تجديد باقة'},
+  {label:'الدردشة مع الإدارة', page:'chat', adminOnly:true, keywords:'شات دردشة دعم مراسلة الإدارة'},
+  {label:'الدعم الفني والشكاوى', page:'tickets', adminOnly:true, keywords:'تذكرة شكوى دعم فني'},
+  {label:'المستخدمون والصلاحيات', page:'users', adminOnly:true, keywords:'مستخدم صلاحية دور دعوة خادم أدمن'},
+];
 App.globalSearch = function(q){
   const box = document.getElementById('search-results');
   q = q.trim().toLowerCase();
   if(!q){ box.style.display='none'; return; }
   const results = [];
+  NAV_ITEMS.forEach(it=>{
+    if(!it.adminOnly || CURRENT_USER.role==='admin' || IMPERSONATING){
+      if(it.label.toLowerCase().includes(q)) results.push({label:it.label, sub:'صفحة', action:`App.navigate('${it.id}')`});
+    }
+  });
+  CHURCH_SEARCH_INDEX.forEach(it=>{
+    if(it.adminOnly && !(CURRENT_USER.role==='admin' || IMPERSONATING)) return;
+    if(it.label.toLowerCase().includes(q) || (it.keywords||'').toLowerCase().includes(q)){
+      results.push({label:it.label, sub:'ميزة/إعداد', action:`App.navigate('${it.page}')`});
+    }
+  });
   DB.members.forEach(m=>{
     if([m.name,m.code,m.phone].some(v=>String(v||'').toLowerCase().includes(q)))
       results.push({label:m.name, sub:'مخدوم — '+esc(nameOf(DB.classes,m.classId)), action:`App.navigate('memberProfile','${m.id}')`});
@@ -3722,6 +3960,11 @@ App.globalSearch = function(q){
     if([s.name,s.code,s.phone].some(v=>String(v||'').toLowerCase().includes(q)))
       results.push({label:s.name, sub:'خادم', action:`Servants.viewProfile('${s.id}')`});
   });
+  (DB.users||[]).forEach(u=>{
+    if([u.name,u.email].some(v=>String(v||'').toLowerCase().includes(q)))
+      results.push({label:u.name, sub:'مستخدم — '+(ROLE_LABELS[u.role]||u.role), action:`App.navigate('users')`});
+  });
+  DB.stages.forEach(s=>{ if((s.name||'').toLowerCase().includes(q)) results.push({label:s.name, sub:'مرحلة', action:`App.navigate('stages')`}); });
   if(!results.length){ box.innerHTML = '<div class="sr-item muted">لا توجد نتائج</div>'; box.style.display='block'; return; }
   box.innerHTML = results.slice(0,10).map(r=>`<div class="sr-item" onclick="${r.action}">${esc(r.label)}<small>${r.sub}</small></div>`).join('');
   box.style.display = 'block';
@@ -3743,6 +3986,16 @@ function applyTheme(key){
   document.documentElement.style.setProperty('--gold', t.gold);
 }
 
+/* مؤشر بسيط لحالة الاتصال — Firestore أصلاً بيخزن محليًا (enableIndexedDbPersistence) ويزامن
+   تلقائيًا لما النت يرجع، فده مجرد إشعار بصري للمستخدم مش آلية تخزين جديدة */
+function updateOfflineBadge(){
+  const badge = document.getElementById('offline-badge');
+  if(badge) badge.style.display = navigator.onLine ? 'none' : 'block';
+}
+window.addEventListener('online', updateOfflineBadge);
+window.addEventListener('offline', updateOfflineBadge);
+updateOfflineBadge();
+
 /* ---------- Boot ---------- */
 document.getElementById('login-pass').addEventListener('keydown', e=>{ if(e.key==='Enter') App.login(); });
 document.getElementById('login-user').addEventListener('keydown', e=>{ if(e.key==='Enter') document.getElementById('login-pass').focus(); });
@@ -3753,10 +4006,51 @@ if('serviceWorker' in navigator){
 }
 let PUBLIC_CONTACTS = {};
 let ANNOUNCEMENT_DISMISSED = false;
+let MAINTENANCE_CFG = null;
+/* بوابة وضع الصيانة — بترجع true لو وقفت المستخدم عند شاشة الصيانة (يبقى لازم توقف باقي كود الدخول) */
+function enforceMaintenanceGate(){
+  if(!MAINTENANCE_CFG || !MAINTENANCE_CFG.enabled) return false;
+  const role = CURRENT_USER && CURRENT_USER.role;
+  if(role==='superadmin' || role==='subadmin') return false; // المالك والأدمن الفرعي بيعدّوا عادي
+  if(auth.currentUser) signOut(auth).catch(()=>{});
+  CURRENT_USER = null; CURRENT_CHURCH_ID = null; CURRENT_CHURCH = null; CHURCH_ACCESS_LOCKED = false;
+  hideAllAuthScreens();
+  const dEl = document.getElementById('maintenance-return-date');
+  if(dEl) dEl.textContent = MAINTENANCE_CFG.expectedReturn ? '📅 موعد الرجوع المتوقع: '+fmtDate(MAINTENANCE_CFG.expectedReturn) : '';
+  document.getElementById('maintenance-screen').style.display = 'flex';
+  return true;
+}
+App.showAdminLoginModal = function(){
+  UI.openModal('تسجيل دخول الأدمن 🔒', `
+    <div class="field"><label>البريد الإلكتروني</label><input id="ml-email" type="email"></div>
+    <div class="field"><label>كلمة المرور</label><input id="ml-pass" type="password"></div>
+    <p class="login-error" id="ml-error" style="display:block;"></p>
+  `, `<button class="btn btn-primary btn-block" onclick="App.maintenanceLogin()">دخول</button>`);
+};
+App.maintenanceLogin = async function(){
+  const email = document.getElementById('ml-email').value.trim();
+  const pass = document.getElementById('ml-pass').value;
+  const errEl = document.getElementById('ml-error');
+  errEl.textContent = '';
+  try{
+    const cred = await signInWithEmailAndPassword(auth, email, pass);
+    const roleDoc = await getDoc(doc(dbFire,'users', cred.user.uid));
+    const role = roleDoc.exists() ? roleDoc.data().role : null;
+    if(role!=='superadmin' && role!=='subadmin'){
+      await signOut(auth);
+      errEl.textContent = 'الموقع تحت الصيانة حاليًا — الدخول متاح للإدارة بس.';
+      return;
+    }
+    UI.closeModal();
+    // onAuthStateChanged هيتولى فتح لوحة المالك تلقائيًا
+  }catch(e){ errEl.textContent = 'بيانات الدخول غير صحيحة'; }
+};
 getDoc(doc(dbFire,'platformConfig','public')).then(d=>{
   const cfg = d.exists() ? d.data() : {};
   if(cfg.theme) applyTheme(cfg.theme);
   PUBLIC_CONTACTS = cfg.contacts || {};
+  MAINTENANCE_CFG = cfg.maintenance || {enabled:false};
+  enforceMaintenanceGate();
   const el = document.getElementById('public-contact-link');
   const hasAny = Object.values(PUBLIC_CONTACTS).some(v=>v);
   if(el && hasAny) el.style.display='block';
@@ -3778,7 +4072,6 @@ App.showContactModal = function(){
     {key:'facebook', ic:'📘', label:'فيسبوك', href: c.facebook},
     {key:'instagram', ic:'📷', label:'إنستجرام', href: c.instagram},
     {key:'telegram', ic:'✈️', label:'تليجرام', href: c.telegram},
-    {key:'instagram', ic:'📷', label:'إنستجرام', href: c.instagram},
     {key:'email', ic:'✉️', label:'البريد الإلكتروني', href: c.email? 'mailto:'+c.email : ''},
     {key:'phone', ic:'📞', label:'اتصال مباشر', href: c.phone? 'tel:'+c.phone : ''},
   ].filter(i=>i.href);

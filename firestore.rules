@@ -169,6 +169,14 @@ service cloud.firestore {
       allow write: if isSuperAdmin() || isSubAdmin();
     }
 
+    // ===== حالة الجلسة النشطة وطابور الانتظار فى الدردشة (نظام الأدوار) =====
+    // مستند واحد بيتشارك فيه الجميع، وأي طرف (كنيسة أو مالك) محتاج يقدر يعدّله
+    // (الكنيسة بتسجّل نفسها فى الطابور، والمالك بيدير مين النشط دلوقتي).
+    match /platformConfig/chatSession {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn();
+    }
+
     // ===== إعدادات عامة للمنصة (زي رابط "تواصل معنا") — تظهر لأي زائر حتى قبل تسجيل الدخول =====
     match /platformConfig/{docId} {
       allow read: if true;
