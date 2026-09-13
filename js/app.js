@@ -3574,12 +3574,12 @@ Views.settings = function(){
   `;
 };
 let CHURCH_LOG_FILTERS = {from: monthStartISO(), to:''};
+const SettingsV = {};
 SettingsV.applyLogFilters = function(){
   CHURCH_LOG_FILTERS = { from: document.getElementById('log-f-from').value, to: document.getElementById('log-f-to').value };
   Views.settings();
 };
 SettingsV.resetLogFilters = function(){ CHURCH_LOG_FILTERS = {from: monthStartISO(), to:''}; Views.settings(); };
-const SettingsV = {};
 SettingsV.save = async function(){
   const data = {
     churchName: document.getElementById('s-church').value.trim(),
