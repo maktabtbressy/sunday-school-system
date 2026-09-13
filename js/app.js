@@ -161,7 +161,57 @@ function previewAvatarClick(e){
   const src = e.currentTarget.getAttribute('data-photo');
   if(src) UI.previewImage(src);
 }
+/* ---- طباعة بطاقة QR (للمخدوم أو الخادم) — بتفتح نافذة طباعة منفصلة بتصميم بطاقة صغيرة ---- */
+async function printPersonCard(person, subLabel){
+  if(!person || !person.code){ toast('لازم يكون عنده كود مسجّل الأول'); return; }
+  if(!window.QRCode){ toast('تعذر تحميل مكتبة الباركود — تأكد من اتصال الإنترنت'); return; }
+  let qrDataUrl;
+  try{ qrDataUrl = await QRCode.toDataURL(person.code, {width:220, margin:1, color:{dark:'#2F5D50', light:'#FFFFFF'}}); }
+  catch(e){ console.error(e); toast('تعذر توليد الكود'); return; }
+  const w = window.open('', '_blank');
+  if(!w){ toast('برجاء السماح بفتح نوافذ منبثقة لطباعة البطاقة'); return; }
+  w.document.write(`
+    <html dir="rtl"><head><meta charset="utf-8"><title>بطاقة ${esc(person.name)}</title>
+    <style>
+      body{font-family:'Tahoma',sans-serif; display:flex; align-items:center; justify-content:center; min-height:100vh; margin:0; background:#f4f5f2;}
+      .card{width:320px; border:2px solid #2F5D50; border-radius:18px; padding:22px; text-align:center; background:#fff;}
+      .card .photo{width:70px; height:70px; border-radius:50%; object-fit:cover; margin-bottom:8px;}
+      .card img.qr{width:180px; height:180px; margin:12px auto; display:block;}
+      .card h2{margin:6px 0 2px; color:#2F5D50; font-size:19px;}
+      .card .sub{color:#8A5A20; font-size:12.5px; margin-bottom:4px;}
+      .card .code{font-family:monospace; font-size:14px; color:#555; letter-spacing:1px;}
+      @media print{ body{background:#fff;} }
+    </style></head>
+    <body>
+      <div class="card">
+        ${person.photo? `<img class="photo" src="${person.photo}">` : ''}
+        <h2>${esc(person.name)}</h2>
+        <div class="sub">${esc(subLabel||'')}</div>
+        <img class="qr" src="${qrDataUrl}">
+        <div class="code">${esc(person.code)}</div>
+      </div>
+      <script>window.onload=function(){ setTimeout(function(){ window.print(); }, 300); };</script>
+    </body></html>
+  `);
+  w.document.close();
+}
+window.printPersonCard = printPersonCard;
 window.previewAvatarClick = previewAvatarClick;
+/* ---- إشعارات المتصفح (تشتغل والتاب فاتح فى الخلفية بس — مفيش سيرفر بريد/Push حقيقي) ---- */
+function enableBrowserNotifications(){
+  if(!('Notification' in window)){ toast('المتصفح ده مش بيدعم الإشعارات'); return; }
+  if(Notification.permission === 'granted'){ toast('الإشعارات مفعّلة بالفعل'); return; }
+  Notification.requestPermission().then(perm=>{
+    if(perm==='granted'){ toast('تم تفعيل الإشعارات ✅'); if(CURRENT_PAGE==='settings') Views.settings(); }
+    else toast('تم رفض الإذن — تقدر تفعّله من إعدادات المتصفح لاحقًا');
+  });
+}
+function notifyUser(title, body){
+  if(!('Notification' in window) || Notification.permission!=='granted') return;
+  if(!document.hidden) return; // مفيش داعي إشعار لو المستخدم شايف الشاشة فعليًا
+  try{ new Notification(title, {body, icon:'icons/icon-192.png'}); }catch(e){ console.error(e); }
+}
+window.enableBrowserNotifications = enableBrowserNotifications;
 window.Scanner = Scanner;
 /* هذه الدوال بتتنادى من داخل onclick/onchange/oninput فى الـ HTML مباشرة، وبما إن app.js
    شغّال كـ ES module فكل الدوال بتبقى محجوبة جوه نطاق الملف ومش متاحة عالميًا تلقائيًا —
@@ -299,7 +349,7 @@ function attachListeners(onReady){
   LIVE_COLLECTIONS.forEach(col=>{
     const q = query(collection(dbFire, col), where('churchId','==',CURRENT_CHURCH_ID));
     const unsub = onSnapshot(q, snap=>{
-      DB[col] = snap.docs.map(d=>({id:d.id, ...d.data()}));
+      DB[col] = snap.docs.map(d=>({id:d.id, ...d.data()})).filter(x=>!x.deletedAt);
       tick();
     }, err=>{ console.error(col, err); toast('تعذر تحميل بيانات: '+col); });
     unsubscribers.push(unsub);
@@ -352,10 +402,13 @@ function attachListeners(onReady){
   unsubscribers.push(unsubProofs);
 
   // رسائل الدردشة مع الإدارة
+  let chatFirstLoad = true;
   const unsubChat = onSnapshot(query(collection(dbFire,'chatMessages'), where('churchId','==',CURRENT_CHURCH_ID)), snap=>{
     DB.chatMessages = snap.docs.map(d=>({id:d.id, ...d.data()})).sort((a,b)=>(a.createdAt||0)-(b.createdAt||0));
     const unread = DB.chatMessages.filter(m=> m.senderRole==='superadmin' && m.readByChurch===false);
     App.updateNavBadge('chat', unread.length);
+    if(!chatFirstLoad && unread.length) notifyUser('💬 رسالة جديدة من الإدارة', unread[unread.length-1].text||'مرفق صورة');
+    chatFirstLoad = false;
     if(CURRENT_PAGE==='chat'){ Chat.renderMessages(); markChatRead(unread, 'readByChurch'); }
   }, err=>console.error(err));
   unsubscribers.push(unsubChat);
@@ -368,10 +421,13 @@ function attachListeners(onReady){
   unsubscribers.push(unsubTTypes);
 
   // تذاكر الدعم الفني/الشكاوى الخاصة بالكنيسة
+  let ticketsFirstLoad = true;
   const unsubTickets = onSnapshot(query(collection(dbFire,'tickets'), where('churchId','==',CURRENT_CHURCH_ID)), snap=>{
     DB.tickets = snap.docs.map(d=>({id:d.id, ...d.data()})).sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
     const unread = DB.tickets.filter(t=> t.readByChurch===false);
     App.updateNavBadge('tickets', unread.length);
+    if(!ticketsFirstLoad && unread.length) notifyUser('🎫 تحديث على تذكرتك', unread[unread.length-1].ticketNo+' — فيه رد جديد من الإدارة');
+    ticketsFirstLoad = false;
     if(CURRENT_PAGE==='tickets'){ Tickets.render(); markChatRead(unread, 'readByChurch', 'tickets'); }
   }, err=>console.error(err));
   unsubscribers.push(unsubTickets);
@@ -421,6 +477,21 @@ function stopScannerIfActive(){
 document.addEventListener('visibilitychange', ()=>{ if(document.hidden) stopScannerIfActive(); });
 window.addEventListener('pagehide', stopScannerIfActive);
 window.addEventListener('beforeunload', stopScannerIfActive);
+
+/* ---- تسجيل خروج تلقائي بعد فترة خمول طويلة (حماية للأجهزة المشتركة) ---- */
+const IDLE_LIMIT_MS = 30*60*1000; // 30 دقيقة
+let lastActivityAt = Date.now();
+['mousemove','keydown','click','touchstart','scroll'].forEach(evt=>{
+  document.addEventListener(evt, ()=>{ lastActivityAt = Date.now(); }, {passive:true});
+});
+setInterval(()=>{
+  if(!CURRENT_USER) return; // مفيش حد داخل أصلاً
+  if(Date.now() - lastActivityAt > IDLE_LIMIT_MS){
+    lastActivityAt = Date.now(); // نمنع تكرار الاستدعاء
+    toast('تم تسجيل الخروج تلقائيًا بسبب عدم النشاط لفترة طويلة');
+    App.logout();
+  }
+}, 60000);
 async function markChatRead(items, field, col='chatMessages'){  const unread = (items||[]).filter(m=> m[field]===false);
   if(!unread.length) return;
   try{
@@ -858,12 +929,15 @@ SuperAdmin.boot = function(){
 
   // كل الرسائل اللي لسه المالك مقراهاش، عبر كل الكنايس (لعرض شارة عدد + ترتيب الأولوية)
   if(saChatsUnreadUnsub) saChatsUnreadUnsub();
+  let saChatFirstLoad = true;
   saChatsUnreadUnsub = onSnapshot(query(collection(dbFire,'chatMessages'), where('readBySA','==',false)), snap=>{
     const msgs = snap.docs.map(d=>({id:d.id, ...d.data()}));
     SA_UNREAD_BY_CHURCH = {};
     msgs.forEach(m=>{ SA_UNREAD_BY_CHURCH[m.churchId] = (SA_UNREAD_BY_CHURCH[m.churchId]||0) + 1; });
     const badge = document.getElementById('sa-chats-badge');
     if(badge){ badge.textContent = msgs.length; badge.style.display = msgs.length ? 'inline-block' : 'none'; }
+    if(!saChatFirstLoad && msgs.length) notifyUser('💬 رسالة جديدة من كنيسة', msgs[msgs.length-1].text||'مرفق صورة');
+    saChatFirstLoad = false;
     if(SA_PAGE==='chats' && !SA_CHAT_CHURCH_ID) SuperAdmin.render();
   }, err=>console.error(err));
 
@@ -886,11 +960,14 @@ SuperAdmin.boot = function(){
 
   // كل التذاكر عبر كل الكنايس
   if(saTicketsUnsub) saTicketsUnsub();
+  let saTicketsFirstLoad = true;
   saTicketsUnsub = onSnapshot(collection(dbFire,'tickets'), snap=>{
     SA_TICKETS = snap.docs.map(d=>({id:d.id, ...d.data()})).sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
-    const unreadCount = SA_TICKETS.filter(t=>t.readBySA===false).length;
+    const unreadTix = SA_TICKETS.filter(t=>t.readBySA===false);
     const badge = document.getElementById('sa-tickets-badge');
-    if(badge){ badge.textContent = unreadCount; badge.style.display = unreadCount ? 'inline-block' : 'none'; }
+    if(badge){ badge.textContent = unreadTix.length; badge.style.display = unreadTix.length ? 'inline-block' : 'none'; }
+    if(!saTicketsFirstLoad && unreadTix.length) notifyUser('🎫 تذكرة جديدة', unreadTix[unreadTix.length-1].title||'');
+    saTicketsFirstLoad = false;
     if(SA_PAGE==='tickets') SuperAdmin.render();
   }, err=>console.error(err));
 
@@ -1735,6 +1812,11 @@ SuperAdmin.renderLinks = function(el){
   const ann = SA_PUBLIC_CONFIG.announcement || {};
   const maint = SA_PUBLIC_CONFIG.maintenance || {};
   el.innerHTML = `
+    <div class="card card-pad" style="margin-bottom:16px;">
+      <b style="font-size:13px; display:block; margin-bottom:8px;">🔔 إشعارات المتصفح</b>
+      <p class="muted" style="margin:0 0 10px;">هتوصلك إشعار فوري لما تيجي رسالة أو تذكرة من أي كنيسة، حتى لو التاب فى الخلفية.</p>
+      <button class="btn btn-primary btn-sm" onclick="enableBrowserNotifications()">${window.Notification && Notification.permission==='granted' ? '✅ الإشعارات مفعّلة' : '🔔 تفعيل الإشعارات'}</button>
+    </div>
     <div class="card card-pad" style="margin-bottom:16px; ${maint.enabled?'border-color:#E7C6BE; background:var(--absent-bg);':''}">
       <b style="font-size:13px; display:block; margin-bottom:8px;">🚧 وضع الصيانة (يقفل الموقع مؤقتًا عن كل الكنايس أثناء التطوير)</b>
       <label style="display:flex; align-items:center; gap:8px; font-weight:400; font-size:13px; margin-bottom:10px;">
@@ -2303,6 +2385,7 @@ const NAV_ITEMS = [
   {id:'users', label:'المستخدمون والصلاحيات', ic:'👥', adminOnly:true},
   {id:'settings', label:'الإعدادات', ic:'⚙️', adminOnly:true},
   {id:'backup', label:'النسخ الاحتياطي', ic:'💾', adminOnly:true},
+  {id:'trash', label:'سلة المحذوفات', ic:'🗑️', adminOnly:true},
 ];
 let IMPERSONATING = false; // true لما المالك يدخل مؤقتًا للوحة كنيسة معينة
 function buildNav(){
@@ -2336,7 +2419,7 @@ App.navigate = function(page, param){
     dashboard: Views.dashboard, members: Views.members, servants: Views.servants,
     stages: Views.stages, attendance: Views.attendance, evaluations: Views.evaluations,
     followups: Views.followups, activities: Views.activities, reports: Views.reports,
-    users: Views.users, settings: Views.settings, backup: Views.backup,
+    users: Views.users, settings: Views.settings, backup: Views.backup, trash: Views.trash,
     memberProfile: Views.memberProfile, billing: Views.billing, chat: Views.chat, tickets: Views.tickets,
   };
   (map[page]||Views.dashboard)(param);
@@ -2401,6 +2484,16 @@ Views.dashboard = function(){
     return c>d;
   }).length;
   const needFollowup = computeNeedFollowup();
+  const upcomingBirthdays = (()=>{
+    const now = new Date(); now.setHours(0,0,0,0);
+    return activeMembers.filter(m=>m.birthDate).map(m=>{
+      const b = new Date(m.birthDate);
+      let next = new Date(now.getFullYear(), b.getMonth(), b.getDate());
+      if(next < now) next = new Date(now.getFullYear()+1, b.getMonth(), b.getDate());
+      const days = Math.round((next-now)/86400000);
+      return {...m, nextBirthday: next.toISOString().slice(0,10), daysUntil: days};
+    }).filter(m=>m.daysUntil<=7).sort((a,b)=>a.daysUntil-b.daysUntil);
+  })();
   const monthAgo = new Date(); monthAgo.setDate(monthAgo.getDate()-30);
   const monthAtt = D.attendance.filter(a=>new Date(a.date)>=monthAgo);
   const monthPresentPct = monthAtt.length ? Math.round(monthAtt.filter(a=>a.present).length/monthAtt.length*100) : 0;
@@ -2429,6 +2522,12 @@ Views.dashboard = function(){
       <div id="dash-chart-box"></div>
     </div>
     <div class="dash-grid">
+      <div class="card card-pad">
+        <div class="section-head"><h2>🎂 أعياد الميلاد القادمة (٧ أيام)</h2></div>
+        ${upcomingBirthdays.length ? `<table><tbody>${upcomingBirthdays.map(m=>`
+          <tr><td>${esc(m.name)}</td><td class="muted">${fmtDate(m.nextBirthday)}</td></tr>
+        `).join('')}</tbody></table>` : `<p class="muted">مفيش أعياد ميلاد فى الأسبوع الجاي.</p>`}
+      </div>
       <div class="card card-pad">
         <div class="section-head"><h2>مخدومون بحاجة إلى متابعة</h2></div>
         ${needFollowup.length? `<table><tbody>${needFollowup.slice(0,6).map(m=>`
@@ -2545,6 +2644,7 @@ function listPage(opts){
         <input placeholder="بحث..." id="lp-search" oninput="opts_search()" style="min-width:180px;">
         ${filterHtml? `<button class="btn btn-ghost btn-sm" onclick="_lpReset()">إعادة تعيين</button>`:''}
         ${opts.addLabel? `<button class="btn btn-gold btn-sm" onclick="${opts.onAdd}">+ ${opts.addLabel}</button>`:''}
+        ${opts.extraButtonsHtml||''}
       </div>
     </div>
     <div class="card"><div id="lp-table-wrap"></div></div>
@@ -2573,9 +2673,61 @@ function renderListTable(opts){
 
 /* ---------- Members ---------- */
 const Members = {};
+Members.printCard = function(id){
+  const m = byId(DB.members, id);
+  if(!m) return;
+  printPersonCard(m, esc(nameOf(DB.stages,m.stageId))+' — '+esc(nameOf(DB.classes,m.classId)));
+};
+/* استيراد جماعي من CSV — الأعمدة المتوقعة (بالترتيب): الاسم, الكود, الهاتف, تاريخ الميلاد(YYYY-MM-DD), الجنس, المرحلة, الصف, الفصل
+   المرحلة/الصف/الفصل لازم تتطابق بالاسم بالظبط مع الموجود عندك بالفعل، وإلا هيتسجّل المخدوم من غيرهم. */
+function parseCsvLine(line){
+  const out = []; let cur=''; let inQuotes=false;
+  for(let i=0;i<line.length;i++){
+    const ch = line[i];
+    if(ch==='"'){ inQuotes=!inQuotes; }
+    else if(ch===',' && !inQuotes){ out.push(cur); cur=''; }
+    else cur+=ch;
+  }
+  out.push(cur);
+  return out.map(s=>s.trim());
+}
+Members.importCSV = async function(file){
+  if(!file) return;
+  try{
+    const text = await file.text();
+    const lines = text.split(/\r?\n/).filter(l=>l.trim());
+    if(!lines.length){ toast('الملف فاضي'); return; }
+    // تجاهل السطر الأول لو كان عناوين أعمدة (يحتوي على "اسم" أو "name")
+    const startIdx = /اسم|name/i.test(lines[0]) ? 1 : 0;
+    const rows = lines.slice(startIdx).map(parseCsvLine).filter(r=>r[0]);
+    if(!rows.length){ toast('مفيش صفوف بيانات صالحة فى الملف'); return; }
+    if(!confirm(`هيتم استيراد ${rows.length} مخدوم جديد. متابعة؟`)) return;
+    const batch = writeBatch(dbFire);
+    let count = 0;
+    rows.forEach(r=>{
+      const [name, code, phone, birthDate, gender, stageName, gradeName, className] = r;
+      if(!name) return;
+      const stage = stageName ? DB.stages.find(s=>s.name===stageName) : null;
+      const grade = gradeName ? DB.grades.find(g=>g.name===gradeName && (!stage||g.stageId===stage.id)) : null;
+      const cls = className ? DB.classes.find(c=>c.name===className && (!grade||c.gradeId===grade.id)) : null;
+      const ref = doc(collection(dbFire,'members'));
+      batch.set(ref, {
+        name, code: code||('M-'+Date.now().toString().slice(-6)+count), phone: phone||'', birthDate: birthDate||'',
+        gender: gender||'', stageId: stage?stage.id:null, gradeId: grade?grade.id:null, classId: cls?cls.id:null,
+        status:'active', churchId: CURRENT_CHURCH_ID, createdAt: Date.now(),
+      });
+      count++;
+    });
+    await batch.commit();
+    await log('استيراد مخدومين من CSV', count+' مخدوم');
+    toast(`تم استيراد ${count} مخدوم بنجاح`);
+    document.getElementById('members-csv-input').value = '';
+  }catch(e){ console.error(e); toast('تعذر الاستيراد: '+e.message); }
+};
 Views.members = function(){
   listPage({
     title:'المخدومون', addLabel:'إضافة مخدوم', onAdd:'Members.openForm()',
+    extraButtonsHtml:`<button class="btn btn-ghost btn-sm" onclick="document.getElementById('members-csv-input').click()">📥 استيراد CSV</button><input type="file" id="members-csv-input" accept=".csv" style="display:none;" onchange="Members.importCSV(this.files[0])">`,
     searchFields:['name','code','phone'],
     filtersHtml:`
       <select id="mf-stage" onchange="_lpRender()"><option value="">كل المراحل</option>${DB.stages.map(s=>`<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select>
@@ -2654,16 +2806,11 @@ Members.save = async function(id){
 };
 Members.remove = async function(id){
   const m = byId(DB.members,id);
-  if(!confirm(`هل أنت متأكد من حذف "${m.name}"؟ سيتم حذف كل سجلاته من حضور وتقييمات ومتابعة.`)) return;
+  if(!confirm(`نقل "${m.name}" لسلة المحذوفات؟ تقدر تسترجعه خلال ٣٠ يوم من "سلة المحذوفات".`)) return;
   try{
-    await Promise.all([
-      fsDelete('members', id),
-      fsDeleteWhere('attendance','memberId',id),
-      fsDeleteWhere('evaluations','memberId',id),
-      fsDeleteWhere('followups','memberId',id),
-    ]);
-    await log('حذف مخدوم', m.name);
-    App.navigate('members'); toast('تم الحذف');
+    await updateDoc(doc(dbFire,'members',id), {deletedAt: Date.now()});
+    await log('نقل مخدوم لسلة المحذوفات', m.name);
+    App.navigate('members'); toast('تم النقل لسلة المحذوفات');
   }catch(e){ console.error(e); toast('تعذر الحذف: '+e.message); }
 };
 
@@ -2690,6 +2837,7 @@ Views.memberProfile = function(id){
           <div class="muted">${esc(nameOf(DB.stages,m.stageId))} — ${esc(nameOf(DB.grades,m.gradeId))} — ${esc(nameOf(DB.classes,m.classId))} · ${esc(m.gender||'')} · السن ${age(m.birthDate)} · ${statusPill(m.status)}</div>
         </div>
         <button class="btn btn-ghost btn-sm no-print" onclick="Members.openForm('${m.id}')">تعديل البيانات</button>
+        <button class="btn btn-gold btn-sm no-print" onclick="Members.printCard('${m.id}')">🎫 طباعة بطاقة</button>
       </div>
       <div class="stat-grid">
         ${statCard('نسبة الحضور', pct+'%','good')}
@@ -2750,6 +2898,11 @@ Members.renderTab = function(m, records, evals, fups, acts){
 
 /* ---------- Servants ---------- */
 const Servants = {};
+Servants.printCard = function(id){
+  const s = byId(DB.servants, id);
+  if(!s) return;
+  printPersonCard(s, 'خادم');
+};
 Views.servants = function(){
   listPage({
     title:'الخدام', addLabel:'إضافة خادم', onAdd:'Servants.openForm()',
@@ -2831,10 +2984,10 @@ Servants.save = async function(id){
 };
 Servants.remove = async function(id){
   const s = byId(DB.servants,id);
-  if(!confirm(`هل تريد حذف الخادم "${s.name}"؟`)) return;
+  if(!confirm(`نقل "${s.name}" لسلة المحذوفات؟ تقدر تسترجعه خلال ٣٠ يوم.`)) return;
   try{
-    await fsDelete('servants', id);
-    await log('حذف خادم', s.name); App.navigate('servants'); toast('تم الحذف');
+    await updateDoc(doc(dbFire,'servants',id), {deletedAt: Date.now()});
+    await log('نقل خادم لسلة المحذوفات', s.name); App.navigate('servants'); toast('تم النقل لسلة المحذوفات');
   }catch(e){ console.error(e); toast('تعذر الحذف: '+e.message); }
 };
 
@@ -3031,6 +3184,7 @@ Attendance.render = function(){
         <h2 style="font-size:14px;">${fmtDate(date)} — ${esc(nameOf(DB.classes,classId))} (${members.length} مخدوم)</h2>
         <div class="toolbar no-print">
           <button class="btn btn-ghost btn-sm" onclick="Attendance.markAll(true)">تحديد الكل حاضر</button>
+          <button class="btn btn-ghost btn-sm" onclick="Attendance.printRoster('${classId}','${date}')">🖨 طباعة كشف الفصل</button>
           <button class="btn btn-primary btn-sm" onclick="Attendance.saveAll()">حفظ الحضور</button>
         </div>
       </div>
@@ -3046,6 +3200,31 @@ Attendance.render = function(){
       </tbody></table>
     </div>
   `;
+};
+Attendance.printRoster = function(classId, date){
+  const members = DB.members.filter(m=>m.classId===classId && m.status!=='inactive').sort((a,b)=>a.name.localeCompare(b.name,'ar'));
+  const w = window.open('', '_blank');
+  if(!w){ toast('برجاء السماح بفتح نوافذ منبثقة للطباعة'); return; }
+  w.document.write(`
+    <html dir="rtl"><head><meta charset="utf-8"><title>كشف حضور — ${esc(nameOf(DB.classes,classId))}</title>
+    <style>
+      body{font-family:'Tahoma',sans-serif; padding:24px;}
+      h2{color:#2F5D50; margin-bottom:4px;}
+      p{color:#555; margin-top:0;}
+      table{width:100%; border-collapse:collapse; margin-top:16px;}
+      th,td{border:1px solid #ccc; padding:8px 10px; text-align:right; font-size:13px;}
+      th{background:#f4f5f2;}
+      td.sig{width:160px;}
+    </style></head>
+    <body>
+      <h2>كشف حضور — ${esc(nameOf(DB.classes,classId))}</h2>
+      <p>المرحلة: ${esc(nameOf(DB.stages, DB.classes.find(c=>c.id===classId)?.stageId))} · التاريخ: ${esc(fmtDate(date))} · العدد: ${members.length}</p>
+      <table><thead><tr><th>#</th><th>الاسم</th><th>الكود</th><th class="sig">التوقيع</th></tr></thead>
+      <tbody>${members.map((m,i)=>`<tr><td>${i+1}</td><td>${esc(m.name)}</td><td>${esc(m.code||'')}</td><td class="sig"></td></tr>`).join('')}</tbody></table>
+      <script>window.onload=function(){ setTimeout(function(){ window.print(); }, 300); };</script>
+    </body></html>
+  `);
+  w.document.close();
 };
 Attendance.scanCode = async function(code){
   const val = (code||'').trim();
@@ -3279,8 +3458,8 @@ Activities.save = async function(id){
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
 };
 Activities.remove = async function(id){
-  if(!confirm('حذف النشاط؟')) return;
-  try{ await fsDelete('activities', id); App.navigate('activities'); }
+  if(!confirm('نقل النشاط لسلة المحذوفات؟ تقدر تسترجعه خلال ٣٠ يوم.')) return;
+  try{ await updateDoc(doc(dbFire,'activities',id), {deletedAt: Date.now()}); App.navigate('activities'); toast('تم النقل لسلة المحذوفات'); }
   catch(e){ console.error(e); toast('تعذر الحذف: '+e.message); }
 };
 
@@ -3526,6 +3705,11 @@ Views.settings = function(){
   if(CHURCH_LOG_FILTERS.to) filteredLog = filteredLog.filter(l=> l.date && l.date.slice(0,10) <= CHURCH_LOG_FILTERS.to);
   $content().innerHTML = `
     <div class="section-head"><h2>إعدادات النظام</h2></div>
+    <div class="card card-pad" style="max-width:560px; margin-bottom:16px;">
+      <b style="font-size:13px; display:block; margin-bottom:8px;">🔔 إشعارات المتصفح</b>
+      <p class="muted" style="margin:0 0 10px;">هتوصلك إشعار فوري لما يجيلك رد شات أو تذكرة جديدة، حتى لو التاب فاتح فى الخلفية.</p>
+      <button class="btn btn-primary btn-sm" onclick="enableBrowserNotifications()">${window.Notification && Notification.permission==='granted' ? '✅ الإشعارات مفعّلة' : '🔔 تفعيل الإشعارات'}</button>
+    </div>
     <div class="card card-pad" style="max-width:560px;">
       <div class="form-grid">
         <div class="field full"><label>اسم الكنيسة</label><input id="s-church" value="${esc(s.churchName||'')}"></div>
@@ -3625,6 +3809,70 @@ Views.backup = function(){
   `;
 };
 const BackupV = {};
+/* ---------- سلة المحذوفات (Members/Servants/Activities) ---------- */
+const TrashV = {};
+Views.trash = function(){
+  $content().innerHTML = `<div class="section-head"><h2>🗑️ سلة المحذوفات</h2></div><p class="muted">جاري التحميل...</p>`;
+  TrashV.load();
+};
+TrashV.load = async function(){
+  try{
+    const [mSnap, sSnap, aSnap] = await Promise.all([
+      getDocs(query(collection(dbFire,'members'), where('churchId','==',CURRENT_CHURCH_ID))),
+      getDocs(query(collection(dbFire,'servants'), where('churchId','==',CURRENT_CHURCH_ID))),
+      getDocs(query(collection(dbFire,'activities'), where('churchId','==',CURRENT_CHURCH_ID))),
+    ]);
+    const THIRTY_DAYS = 30*86400000;
+    const now = Date.now();
+    const purge = [];
+    const members = mSnap.docs.map(d=>({id:d.id, ...d.data()})).filter(x=>x.deletedAt).filter(x=>{
+      if(now-x.deletedAt>THIRTY_DAYS){ purge.push(['members',x.id]); return false; } return true;
+    });
+    const servants = sSnap.docs.map(d=>({id:d.id, ...d.data()})).filter(x=>x.deletedAt).filter(x=>{
+      if(now-x.deletedAt>THIRTY_DAYS){ purge.push(['servants',x.id]); return false; } return true;
+    });
+    const activities = aSnap.docs.map(d=>({id:d.id, ...d.data()})).filter(x=>x.deletedAt).filter(x=>{
+      if(now-x.deletedAt>THIRTY_DAYS){ purge.push(['activities',x.id]); return false; } return true;
+    });
+    if(purge.length){ await Promise.all(purge.map(([col,id])=>fsDelete(col,id))); } // تنظيف تلقائي لأي حاجة عدّت 30 يوم
+    TrashV.render(members, servants, activities);
+  }catch(e){ console.error(e); toast('تعذر تحميل سلة المحذوفات: '+e.message); }
+};
+TrashV.render = function(members, servants, activities){
+  const section = (title, items, col, nameField)=> `
+    <div class="section-head" style="margin-top:18px;"><h2>${title} (${items.length})</h2></div>
+    <div class="card">
+      ${items.length ? items.map(x=>`
+        <div style="padding:12px 16px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
+          <div><b>${esc(x[nameField]||x.name||'')}</b><div class="muted" style="font-size:11.5px;">اتحذف في ${fmtDate(new Date(x.deletedAt).toISOString())}</div></div>
+          <div class="row-actions">
+            <button class="btn btn-ghost btn-sm" onclick="TrashV.restore('${col}','${x.id}')">↩ استرجاع</button>
+            <button class="btn btn-danger btn-sm" onclick="TrashV.purgeNow('${col}','${x.id}')">🗑 حذف نهائي</button>
+          </div>
+        </div>
+      `).join('') : `<p class="muted" style="padding:16px;">فاضية.</p>`}
+    </div>
+  `;
+  $content().innerHTML = `
+    <div class="section-head"><h2>🗑️ سلة المحذوفات</h2></div>
+    <p class="muted">أي حاجة هنا بتتحذف نهائيًا تلقائيًا بعد ٣٠ يوم من نقلها هنا.</p>
+    ${section('المخدومون', members, 'members', 'name')}
+    ${section('الخدام', servants, 'servants', 'name')}
+    ${section('الأنشطة', activities, 'activities', 'name')}
+  `;
+};
+TrashV.restore = async function(col, id){
+  try{ await updateDoc(doc(dbFire,col,id), {deletedAt: null}); toast('تم الاسترجاع'); TrashV.load(); }
+  catch(e){ console.error(e); toast('تعذر الاسترجاع: '+e.message); }
+};
+TrashV.purgeNow = async function(col, id){
+  if(!confirm('حذف نهائي — لن تقدر تسترجعه تاني. متأكد؟')) return;
+  try{
+    await fsDelete(col, id);
+    if(col==='members'){ await Promise.all([fsDeleteWhere('attendance','memberId',id), fsDeleteWhere('evaluations','memberId',id), fsDeleteWhere('followups','memberId',id)]); }
+    toast('تم الحذف النهائي'); TrashV.load();
+  }catch(e){ console.error(e); toast('تعذر الحذف: '+e.message); }
+};
 BackupV.download = async function(){
   const blob = new Blob([JSON.stringify(DB,null,2)], {type:'application/json'});
   const url = URL.createObjectURL(blob);
@@ -4180,4 +4428,4 @@ App.showContactModal = function(){
 window.App = App; window.UI = UI; window.Members = Members; window.Servants = Servants;
 window.Stages = Stages; window.Attendance = Attendance; window.Evaluations = Evaluations;
 window.Followups = Followups; window.Activities = Activities; window.Reports = Reports;
-window.UsersV = UsersV; window.SettingsV = SettingsV; window.BackupV = BackupV;
+window.UsersV = UsersV; window.SettingsV = SettingsV; window.BackupV = BackupV; window.TrashV = TrashV;
