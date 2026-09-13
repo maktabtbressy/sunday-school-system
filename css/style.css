@@ -208,6 +208,7 @@
   .status-dd-item{display:flex; align-items:center; gap:8px; padding:8px 10px; border-radius:7px; font-size:13px; cursor:pointer;}
   .status-dd-item:hover{background:var(--paper);}
   .status-dd-item.active{background:var(--gold-soft); font-weight:700;}
+  .nav-a.nav-locked{opacity:.45; cursor:not-allowed;}
 
   /* شريط الإعلان المتحرك (زي شريط الأخبار) — حركة مستمرة سلسة من الشمال لليمين */
   #announcement-bar{position:sticky; top:0; z-index:200; background:var(--navy); color:#fff; display:flex; align-items:center; height:34px; overflow:hidden;}
