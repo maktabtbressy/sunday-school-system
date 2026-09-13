@@ -164,10 +164,8 @@ function previewAvatarClick(e){
 /* ---- طباعة بطاقة QR (للمخدوم أو الخادم) — بتفتح نافذة طباعة منفصلة بتصميم بطاقة صغيرة ---- */
 async function printPersonCard(person, subLabel){
   if(!person || !person.code){ toast('لازم يكون عنده كود مسجّل الأول'); return; }
-  if(!window.QRCode){ toast('تعذر تحميل مكتبة الباركود — تأكد من اتصال الإنترنت'); return; }
-  let qrDataUrl;
-  try{ qrDataUrl = await QRCode.toDataURL(person.code, {width:220, margin:1, color:{dark:'#2F5D50', light:'#FFFFFF'}}); }
-  catch(e){ console.error(e); toast('تعذر توليد الكود'); return; }
+  // بنستخدم خدمة صورة مباشرة (بدون مكتبة JS) عشان نتجنب أي مشكلة تحميل مكتبة من الإنترنت
+  const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(person.code)}`;
   const w = window.open('', '_blank');
   if(!w){ toast('برجاء السماح بفتح نوافذ منبثقة لطباعة البطاقة'); return; }
   w.document.write(`
@@ -187,10 +185,10 @@ async function printPersonCard(person, subLabel){
         ${person.photo? `<img class="photo" src="${person.photo}">` : ''}
         <h2>${esc(person.name)}</h2>
         <div class="sub">${esc(subLabel||'')}</div>
-        <img class="qr" src="${qrDataUrl}">
+        <img class="qr" src="${qrUrl}">
         <div class="code">${esc(person.code)}</div>
       </div>
-      <script>window.onload=function(){ setTimeout(function(){ window.print(); }, 300); };</script>
+      <script>window.onload=function(){ setTimeout(function(){ window.print(); }, 500); };</script>
     </body></html>
   `);
   w.document.close();
@@ -201,6 +199,10 @@ window.previewAvatarClick = previewAvatarClick;
 function enableBrowserNotifications(){
   if(!('Notification' in window)){ toast('المتصفح ده مش بيدعم الإشعارات'); return; }
   if(Notification.permission === 'granted'){ toast('الإشعارات مفعّلة بالفعل'); return; }
+  if(Notification.permission === 'denied'){
+    toast('اترفض الإذن قبل كده — المتصفح مبيسألش تاني تلقائيًا. لازم تفعّله يدوي من إعدادات الموقع (اضغط على 🔒 جنب رابط الموقع فوق ← الإشعارات ← سماح)');
+    return;
+  }
   Notification.requestPermission().then(perm=>{
     if(perm==='granted'){ toast('تم تفعيل الإشعارات ✅'); if(CURRENT_PAGE==='settings') Views.settings(); }
     else toast('تم رفض الإذن — تقدر تفعّله من إعدادات المتصفح لاحقًا');
