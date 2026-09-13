@@ -807,7 +807,8 @@ let SA_TICKET_FILTERS = {type:'', status:'', search:'', from:'', to:''};
 let SA_PUBLIC_CONFIG = {};
 let SA_ADMIN_LINKS = [];
 let SA_ACTIVITY_LOG = [];
-let SA_ACTIVITY_FILTERS = {from:'', to:''};
+function monthStartISO(){ const d=new Date(); return new Date(d.getFullYear(), d.getMonth(), 1).toISOString().slice(0,10); }
+let SA_ACTIVITY_FILTERS = {from: monthStartISO(), to:''};
 let SA_REPORT_FILTERS = {from:'', to:'', category:''};
 let SA_PLANS = [];
 let SA_DISCOUNT_CODES = [];
@@ -897,6 +898,7 @@ SuperAdmin.boot = function(){
   onSnapshot(doc(dbFire,'platformConfig','public'), d=>{
     SA_PUBLIC_CONFIG = d.exists() ? d.data() : {};
     if(SA_PUBLIC_CONFIG.theme) applyTheme(SA_PUBLIC_CONFIG.theme);
+    SuperAdmin.checkBackupReminder();
     if(SA_PAGE==='links') SuperAdmin.render();
   }, err=>console.error(err));
 
@@ -1617,7 +1619,7 @@ SuperAdmin.renderTickets = function(el){
           <select id="tk-f-type"><option value="">الكل</option>${types.map(t=>`<option value="${esc(t)}" ${SA_TICKET_FILTERS.type===t?'selected':''}>${esc(t)}</option>`).join('')}</select>
         </div>
         <div class="field" style="margin:0;"><label>الحالة</label>
-          <select id="tk-f-status"><option value="">الكل</option>${Object.keys(TICKET_STATUS_CLASS).map(s=>`<option value="${s}" ${SA_TICKET_FILTERS.status===s?'selected':''}>${s}</option>`).join('')}</select>
+          <select id="tk-f-status"><option value="">الكل</option>${Object.entries(TICKET_STATUS_META).map(([s,m])=>`<option value="${s}" ${SA_TICKET_FILTERS.status===s?'selected':''}>${m.ic} ${s}</option>`).join('')}</select>
         </div>
         <div class="field" style="margin:0;"><label>بحث برقم التذكرة</label><input id="tk-f-search" value="${esc(SA_TICKET_FILTERS.search)}" placeholder="مثال: TKT-558163"></div>
       </div>
@@ -1635,7 +1637,7 @@ SuperAdmin.renderTickets = function(el){
             <b style="font-size:13px;">${esc(t.ticketNo)} — ${esc(t.title)}</b>
             <div class="muted" style="font-size:11.5px; margin-top:2px;">${esc(church?church.name:'')} · ${esc(t.type||'')} · ${new Date(t.createdAt).toLocaleDateString('ar-EG')}</div>
           </div>
-          ${ticketStatusPill(t.status)}
+          ${ticketStatusPill(t.status, t.cancelledByChurch)}
         </div>`;
       }).join('') : `<p class="muted" style="padding:16px;">لا توجد تذاكر تحتاج متابعة حاليًا. استخدم الفلترة فوق لعرض كل التذاكر (بما فيها المقفولة والملغاة).</p>`}
     </div>
@@ -1681,20 +1683,40 @@ SuperAdmin.openTicketDetail = function(id){
   const t = SA_TICKETS.find(x=>x.id===id);
   if(!t) return;
   const church = SA_CHURCHES.find(c=>c.id===t.churchId);
+  const isCancelledByChurch = !!t.cancelledByChurch;
   UI.openModal(t.ticketNo, `
-    ${ticketStatusPill(t.status)}
-    <h3 style="margin:10px 0 4px; font-size:15px;">${esc(t.title)}</h3>
-    <p class="muted" style="font-size:11.5px; margin-bottom:10px;">${esc(church?church.name:'')} · ${esc(t.createdByName||'')} · ${esc(t.type||'')} · ${new Date(t.createdAt).toLocaleString('ar-EG')}</p>
-    <p style="white-space:pre-wrap; font-size:13.5px;">${esc(t.description)}</p>
-    ${t.attachmentImg? `<img src="${t.attachmentImg}" style="max-width:160px; border-radius:8px; margin-top:10px; cursor:pointer; border:1px solid var(--line);" onclick="UI.previewImage('${t.attachmentImg.replace(/'/g,"\\'")}')">`:''}
-    <div class="field" style="margin-top:16px; border-top:1px solid var(--line); padding-top:14px;">
-      <label>الحالة</label>
-      <select id="tk-status-update">
-        ${Object.keys(TICKET_STATUS_CLASS).map(s=>`<option value="${s}" ${t.status===s?'selected':''}>${s}</option>`).join('')}
-      </select>
+    ${ticketStatusPill(t.status, isCancelledByChurch)}
+    <div class="kv" style="margin-top:14px; margin-bottom:6px;">
+      <b>العميل</b><span>${esc(church?church.name:'')}${t.createdByName?' — '+esc(t.createdByName):''}</span>
+      <b>النوع</b><span>${esc(t.type||'')}</span>
+      <b>التاريخ</b><span>${new Date(t.createdAt).toLocaleString('ar-EG')}</span>
     </div>
-    <div class="field"><label>الرد على الكنيسة</label><textarea id="tk-reply" rows="3" placeholder="اكتب ردك هنا...">${esc(t.adminReply||'')}</textarea></div>
-  `, `<button class="btn btn-primary" onclick="SuperAdmin.saveTicketUpdate('${t.id}')">💾 حفظ وإرسال للكنيسة</button><button class="btn btn-ghost" onclick="UI.closeModal()">إغلاق</button>`);
+    <div style="margin-top:12px;">
+      <b style="font-size:13px;">${esc(t.title)}</b>
+      <div class="card card-pad" style="margin-top:8px; background:var(--paper);">${esc(t.description)}</div>
+    </div>
+    ${t.attachmentImg? `<img src="${t.attachmentImg}" style="max-width:160px; border-radius:8px; margin-top:10px; cursor:pointer; border:1px solid var(--line);" onclick="UI.previewImage('${t.attachmentImg.replace(/'/g,"\\'")}')">`:''}
+    ${t.hasAdminUpdate? `<div class="card card-pad" style="margin-top:14px; background:var(--present-bg); border-color:#BFE0CD;">
+      <b style="font-size:12.5px; color:var(--present);">💬 ردك السابق:</b>
+      <p style="font-size:13px; margin-top:6px; white-space:pre-wrap;">${esc(t.adminReply||'')}</p>
+    </div>` : ''}
+    ${isCancelledByChurch ? `
+      <div class="card card-pad" style="margin-top:16px; background:var(--absent-bg); border-color:#E7C6BE;">
+        🚫 العميل ألغى التذكرة دي بنفسه — للعرض فقط، مينفعش يتغيّر حالتها أو يتبعتلها رد.
+      </div>
+    ` : `
+      <div class="field" style="margin-top:16px; border-top:1px solid var(--line); padding-top:14px;">
+        <label>تغيير الحالة</label>
+        <select id="tk-status-update">
+          ${Object.entries(TICKET_STATUS_META).filter(([s])=>s!=='ملغاة').map(([s,m])=>`<option value="${s}" ${t.status===s?'selected':''}>${m.ic} ${s}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field"><label>الرد على العميل</label><textarea id="tk-reply" rows="3" placeholder="اكتب ردك هنا...">${esc(t.adminReply||'')}</textarea></div>
+    `}
+  `, isCancelledByChurch
+    ? `<button class="btn btn-ghost" onclick="UI.closeModal()">إغلاق</button>`
+    : `<button class="btn btn-primary" onclick="SuperAdmin.saveTicketUpdate('${t.id}')">💾 حفظ وإرسال للعميل</button><button class="btn btn-ghost" onclick="UI.closeModal()">إغلاق</button>`
+  );
   if(t.readBySA===false) markChatRead([t], 'readBySA', 'tickets');
 };
 SuperAdmin.saveTicketUpdate = async function(id){
@@ -1884,7 +1906,7 @@ SuperAdmin.applyActivityFilters = function(){
   SA_ACTIVITY_FILTERS = { from: document.getElementById('ac-f-from').value, to: document.getElementById('ac-f-to').value };
   SuperAdmin.render();
 };
-SuperAdmin.resetActivityFilters = function(){ SA_ACTIVITY_FILTERS = {from:'', to:''}; SuperAdmin.render(); };
+SuperAdmin.resetActivityFilters = function(){ SA_ACTIVITY_FILTERS = {from: monthStartISO(), to:''}; SuperAdmin.render(); };
 
 /* ---- تقرير شامل: إحصائيات الكنايس وطلبات الدفع خلال فترة ---- */
 const CHURCH_STATUS_LABELS = {pending:'قيد المراجعة', trial:'تجربة مجانية', active:'نشطة', expired:'منتهية', rejected:'مرفوضة', exempt:'معفاة'};
@@ -2226,6 +2248,40 @@ SuperAdmin.globalSearch = function(q){
   if(!results.length){ box.innerHTML = '<div class="sr-item muted">لا توجد نتائج</div>'; box.style.display='block'; return; }
   box.innerHTML = results.slice(0,10).map(r=>`<div class="sr-item" onclick="${r.action}">${esc(r.label)}<small>${r.sub}</small></div>`).join('');
   box.style.display = 'block';
+};
+
+SuperAdmin.checkBackupReminder = function(){
+  const banner = document.getElementById('sa-backup-banner');
+  const textEl = document.getElementById('sa-backup-banner-text');
+  if(!banner || !textEl) return;
+  const last = SA_PUBLIC_CONFIG.lastBackupAt;
+  const weekMs = 7*86400000;
+  if(!last || (Date.now()-last) > weekMs){
+    textEl.textContent = last
+      ? `⚠️ آخر نسخة احتياطية كانت من أكتر من أسبوع (${new Date(last).toLocaleDateString('ar-EG')})`
+      : `⚠️ لسه ماخدتش أي نسخة احتياطية شاملة للنظام`;
+    banner.style.display = 'flex';
+  } else {
+    banner.style.display = 'none';
+  }
+};
+SuperAdmin.downloadBackup = async function(){
+  try{
+    const data = {
+      exportedAt: new Date().toISOString(),
+      churches: SA_CHURCHES, tickets: SA_TICKETS, paymentProofs: SA_PROOFS,
+      paymentMethods: SA_METHODS, plans: SA_PLANS, discountCodes: SA_DISCOUNT_CODES,
+    };
+    const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'نسخة-احتياطية-'+todayISO()+'.json';
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+    await setDoc(doc(dbFire,'platformConfig','public'), {lastBackupAt: Date.now()}, {merge:true});
+    await saLog('تنزيل نسخة احتياطية شاملة', '');
+    toast('تم تنزيل النسخة الاحتياطية');
+  }catch(e){ console.error(e); toast('تعذر التنزيل: '+e.message); }
 };
 
 window.SuperAdmin = SuperAdmin;
@@ -3465,6 +3521,9 @@ UsersV.remove = async function(id){
 /* ---------- Settings ---------- */
 Views.settings = function(){
   const s = DB.settings;
+  let filteredLog = DB.auditLog||[];
+  if(CHURCH_LOG_FILTERS.from) filteredLog = filteredLog.filter(l=> l.date && l.date.slice(0,10) >= CHURCH_LOG_FILTERS.from);
+  if(CHURCH_LOG_FILTERS.to) filteredLog = filteredLog.filter(l=> l.date && l.date.slice(0,10) <= CHURCH_LOG_FILTERS.to);
   $content().innerHTML = `
     <div class="section-head"><h2>إعدادات النظام</h2></div>
     <div class="card card-pad" style="max-width:560px;">
@@ -3500,10 +3559,26 @@ Views.settings = function(){
       </div>
     </div>
     <div class="section-head" style="margin-top:26px;"><h2>سجل العمليات</h2></div>
+    <div class="card card-pad" style="margin-bottom:12px;">
+      <div class="toolbar">
+        <div class="field" style="margin:0;"><label>من تاريخ</label><input type="date" id="log-f-from" value="${CHURCH_LOG_FILTERS.from}"></div>
+        <div class="field" style="margin:0;"><label>إلى تاريخ</label><input type="date" id="log-f-to" value="${CHURCH_LOG_FILTERS.to}"></div>
+      </div>
+      <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:10px;">
+        <button class="btn btn-ghost btn-sm" onclick="SettingsV.resetLogFilters()">إعادة تعيين (الشهر الحالي)</button>
+        <button class="btn btn-primary btn-sm" onclick="SettingsV.applyLogFilters()">عرض السجل</button>
+      </div>
+    </div>
     <div class="card"><table><thead><tr><th>التاريخ</th><th>المستخدم</th><th>العملية</th><th>التفاصيل</th></tr></thead>
-    <tbody>${DB.auditLog.slice(0,80).map(l=>`<tr><td>${fmtDate(l.date)}</td><td>${esc(l.user)}</td><td>${esc(l.action)}</td><td class="muted">${esc(l.details)}</td></tr>`).join('')}</tbody></table></div>
+    <tbody>${filteredLog.length ? filteredLog.slice(0,300).map(l=>`<tr><td>${fmtDate(l.date)}</td><td>${esc(l.user)}</td><td>${esc(l.action)}</td><td class="muted">${esc(l.details)}</td></tr>`).join('') : `<tr><td colspan="4" class="muted">لا توجد عمليات مسجلة فى هذه الفترة</td></tr>`}</tbody></table></div>
   `;
 };
+let CHURCH_LOG_FILTERS = {from: monthStartISO(), to:''};
+SettingsV.applyLogFilters = function(){
+  CHURCH_LOG_FILTERS = { from: document.getElementById('log-f-from').value, to: document.getElementById('log-f-to').value };
+  Views.settings();
+};
+SettingsV.resetLogFilters = function(){ CHURCH_LOG_FILTERS = {from: monthStartISO(), to:''}; Views.settings(); };
 const SettingsV = {};
 SettingsV.save = async function(){
   const data = {
@@ -3833,8 +3908,18 @@ window.Chat = Chat;
 
 /* ---------- الدعم الفني والشكاوى (نظام التذاكر) ---------- */
 const Tickets = {};
-const TICKET_STATUS_CLASS = {'مفتوحة':'status-pending', 'قيد المعالجة':'status-trial', 'مغلقة':'status-active', 'ملغاة':'status-expired'};
-function ticketStatusPill(status){ return `<span class="pill ${TICKET_STATUS_CLASS[status]||'status-pending'}">${esc(status||'مفتوحة')}</span>`; }
+const TICKET_STATUS_META = {
+  'جديدة': {ic:'🆕', cls:'status-pending'},
+  'جاري المتابعة': {ic:'🔄', cls:'status-trial'},
+  'قيد التنفيذ': {ic:'⚙️', cls:'status-exempt'},
+  'تم التنفيذ': {ic:'✅', cls:'status-active'},
+  'مرفوضة': {ic:'❌', cls:'status-expired'},
+  'ملغاة': {ic:'🚫', cls:'status-expired'},
+};
+function ticketStatusPill(status, cancelledByChurch){
+  const m = TICKET_STATUS_META[status] || TICKET_STATUS_META['جديدة'];
+  return `<span class="pill ${m.cls}">${m.ic} ${esc(status||'جديدة')}</span>${cancelledByChurch? ' <span class="muted" style="font-size:11px;">(من العميل)</span>':''}`;
+}
 Views.tickets = function(){
   Tickets.render();
   markChatRead((DB.tickets||[]).filter(t=>t.readByChurch===false), 'readByChurch', 'tickets');
@@ -3851,7 +3936,7 @@ Tickets.render = function(){
           <b style="font-size:13px;">${esc(t.ticketNo)} — ${esc(t.title)}</b>
           <div class="muted" style="font-size:11.5px; margin-top:2px;">${esc(t.type||'')} · ${new Date(t.createdAt).toLocaleDateString('ar-EG')}${t.hasAdminUpdate?' · 🆕 فيه رد من الإدارة':''}</div>
         </div>
-        ${ticketStatusPill(t.status)}
+        ${ticketStatusPill(t.status, t.cancelledByChurch)}
       </div>`).join('')}
     </div>` : `<p class="muted">لا توجد تذاكر بعد. لو عندك مشكلة أو شكوى، ابدأ تذكرة جديدة من الزرار اللي فوق.</p>`}
   `;
@@ -3887,7 +3972,7 @@ Tickets.submit = async function(){
     const payload = {
       ticketNo, churchId: CURRENT_CHURCH_ID, churchName: (DB.settings && DB.settings.churchName) || '',
       createdByName: CURRENT_USER.name, createdByRole: IMPERSONATING?'admin':CURRENT_USER.role,
-      type, title, description: desc, status:'مفتوحة', adminReply:'', hasAdminUpdate:false, cancelledByChurch:false,
+      type, title, description: desc, status:'جديدة', adminReply:'', hasAdminUpdate:false, cancelledByChurch:false,
       createdAt: Date.now(), updatedAt: Date.now(), readBySA:false, readByChurch:true,
     };
     if(file) payload.attachmentImg = await smartImageUpload(file, 900, 0.6);
@@ -3900,7 +3985,7 @@ Tickets.openDetail = function(id){
   const t = (DB.tickets||[]).find(x=>x.id===id);
   if(!t) return;
   UI.openModal(t.ticketNo, `
-    ${ticketStatusPill(t.status)}
+    ${ticketStatusPill(t.status, t.cancelledByChurch)}
     <h3 style="margin:10px 0 4px; font-size:15px;">${esc(t.title)}</h3>
     <p class="muted" style="font-size:11.5px; margin-bottom:10px;">${esc(t.type||'')} · ${new Date(t.createdAt).toLocaleString('ar-EG')}</p>
     <p style="white-space:pre-wrap; font-size:13.5px;">${esc(t.description)}</p>
@@ -3909,12 +3994,12 @@ Tickets.openDetail = function(id){
       <b style="font-size:12.5px; color:var(--navy);">رد الإدارة:</b>
       <p style="font-size:13px; margin-top:6px; white-space:pre-wrap;">${esc(t.adminReply||'')}</p>
     </div>` : ''}
-  `, t.status==='مفتوحة' ? `<button class="btn btn-danger btn-block" onclick="Tickets.cancel('${t.id}')">🚫 إلغاء التذكرة</button>` : '');
+  `, t.status==='جديدة' ? `<button class="btn btn-danger btn-block" onclick="Tickets.cancel('${t.id}')">🚫 إلغاء التذكرة</button>` : '');
 };
 Tickets.cancel = async function(id){
   if(!confirm('هل تريد إلغاء هذه التذكرة؟')) return;
   try{
-    await updateDoc(doc(dbFire,'tickets',id), { status:'ملغاة', cancelledByChurch:true });
+    await updateDoc(doc(dbFire,'tickets',id), { status:'ملغاة', cancelledByChurch:true, readBySA:false });
     UI.closeModal();
     toast('تم إلغاء التذكرة');
   }catch(e){ console.error(e); toast('تعذر الإلغاء: '+e.message); }

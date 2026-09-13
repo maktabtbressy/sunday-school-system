@@ -140,14 +140,14 @@ service cloud.firestore {
     match /tickets/{docId} {
       allow read: if isSignedIn() && (isSuperAdmin() || belongsToChurch(resource.data.churchId));
       allow create: if isSignedIn() && (isSuperAdmin() || request.resource.data.churchId == myChurch());
-      // المالك يقدر يعدّل أي حاجة (الرد + الحالة). الكنيسة تقدر بس تلغي تذكرتها وهي لسه مفتوحة،
-      // ومش تقدر تغيّر أي حقل تاني غير حالة الإلغاء نفسها.
+      // المالك يقدر يعدّل أي حاجة (الرد + الحالة). الكنيسة تقدر بس تلغي تذكرتها وهي لسه جديدة،
+      // ومش تقدر تغيّر أي حقل تاني غير حالة الإلغاء وتنبيه المالك.
       allow update: if isSignedIn() && (
         isSuperAdmin() || subAdminCan('support') ||
         (belongsToChurch(resource.data.churchId) &&
-         resource.data.status == 'مفتوحة' &&
+         resource.data.status == 'جديدة' &&
          request.resource.data.status == 'ملغاة' &&
-         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','cancelledByChurch']))
+         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','cancelledByChurch','readBySA']))
       );
       allow delete: if false;
     }
