@@ -2693,10 +2693,42 @@ function parseCsvLine(line){
   out.push(cur);
   return out.map(s=>s.trim());
 }
+Members.showImportGuide = function(){
+  const stageExamples = DB.stages.slice(0,1).map(s=>s.name).join('، ') || 'ابتدائي';
+  UI.openModal('ℹ️ دليل استيراد المخدومين من ملف Excel/CSV', `
+    <p style="font-size:13.5px;">أسهل طريقة تضمن الشكل الصحيح: نزّل النموذج الفاضي تحت، افتحه بالإكسل، املا الصفوف، احفظه، وارفعه تاني.</p>
+    <button class="btn btn-primary btn-sm" style="margin:10px 0;" onclick="Members.downloadCsvTemplate()">⬇️ تحميل نموذج فارغ (CSV)</button>
+    <p style="font-size:13px; margin-top:14px;"><b>ترتيب الأعمدة المطلوب:</b></p>
+    <div class="card" style="overflow-x:auto;">
+      <table style="font-size:12px; white-space:nowrap;">
+        <thead><tr><th>الاسم</th><th>الكود</th><th>الهاتف</th><th>تاريخ الميلاد</th><th>الجنس</th><th>المرحلة</th><th>الصف</th><th>الفصل</th></tr></thead>
+        <tbody><tr><td>مريم سمير</td><td>M-101</td><td>01012345678</td><td>2015-03-20</td><td>أنثى</td><td>${esc(stageExamples)}</td><td>...</td><td>...</td></tr></tbody>
+      </table>
+    </div>
+    <ul style="font-size:12.5px; color:var(--ink-soft); margin-top:12px; padding-inline-start:18px; line-height:1.8;">
+      <li>عمود "الاسم" بس إلزامي — الباقي اختياري وتقدر تسيبه فاضي.</li>
+      <li>تاريخ الميلاد لازم يكون بالشكل ده بالظبط: سنة-شهر-يوم (مثال: 2015-03-20).</li>
+      <li>أعمدة "المرحلة" و"الصف" و"الفصل" لازم تتكتب <b>بنفس الاسم المسجّل عندك بالظبط</b> في النظام (تقدر تتأكد من الأسماء من صفحة "المراحل والفصول")، وإلا المخدوم هيتسجّل من غيرهم وتقدر تحدد فصله بعدين يدويًا.</li>
+      <li>متغيّرش اسم الأعمدة (الصف الأول) في النموذج، وسيبه زي ما هو.</li>
+    </ul>
+  `, `<button class="btn btn-ghost" onclick="UI.closeModal()">تمام، فهمت</button>`);
+};
+Members.downloadCsvTemplate = function(){
+  const headers = 'الاسم,الكود,الهاتف,تاريخ الميلاد,الجنس,المرحلة,الصف,الفصل';
+  const example = 'مريم سمير,M-101,01012345678,2015-03-20,أنثى,'+(DB.stages[0]?.name||'ابتدائي')+',,';
+  const csv = '\uFEFF'+headers+'\n'+example+'\n'; // BOM عشان الإكسل يفتح العربي صح
+  const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'نموذج-استيراد-مخدومين.csv';
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+};
 Members.importCSV = async function(file){
   if(!file) return;
   try{
-    const text = await file.text();
+    let text = await file.text();
+    if(text.charCodeAt(0)===0xFEFF) text = text.slice(1); // إزالة BOM لو موجود (بيتحط تلقائي من إكسل أو من نموذجنا)
     const lines = text.split(/\r?\n/).filter(l=>l.trim());
     if(!lines.length){ toast('الملف فاضي'); return; }
     // تجاهل السطر الأول لو كان عناوين أعمدة (يحتوي على "اسم" أو "name")
@@ -2729,7 +2761,7 @@ Members.importCSV = async function(file){
 Views.members = function(){
   listPage({
     title:'المخدومون', addLabel:'إضافة مخدوم', onAdd:'Members.openForm()',
-    extraButtonsHtml:`<button class="btn btn-ghost btn-sm" onclick="document.getElementById('members-csv-input').click()">📥 استيراد CSV</button><input type="file" id="members-csv-input" accept=".csv" style="display:none;" onchange="Members.importCSV(this.files[0])">`,
+    extraButtonsHtml:`<button class="btn btn-ghost btn-sm" onclick="document.getElementById('members-csv-input').click()">📥 استيراد CSV</button><button class="btn btn-ghost btn-sm" title="دليل الاستخدام" onclick="Members.showImportGuide()">ℹ️ دليل</button><input type="file" id="members-csv-input" accept=".csv" style="display:none;" onchange="Members.importCSV(this.files[0])">`,
     searchFields:['name','code','phone'],
     filtersHtml:`
       <select id="mf-stage" onchange="_lpRender()"><option value="">كل المراحل</option>${DB.stages.map(s=>`<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select>
