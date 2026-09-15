@@ -194,6 +194,40 @@ async function printPersonCard(person, subLabel){
   w.document.close();
 }
 window.printPersonCard = printPersonCard;
+/* طباعة بطاقات لعدة أشخاص دفعة واحدة (شبكة بطاقات فى ورقة واحدة) */
+function printCardsGrid(people){
+  const cardsHtml = people.map(p=>{
+    const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${encodeURIComponent(p.code)}`;
+    return `
+      <div class="card">
+        ${p.photo? `<img class="photo" src="${p.photo}">` : ''}
+        <h3>${esc(p.name)}</h3>
+        <img class="qr" src="${qrUrl}">
+        <div class="code">${esc(p.code)}</div>
+      </div>`;
+  }).join('');
+  const w = window.open('', '_blank');
+  if(!w){ toast('برجاء السماح بفتح نوافذ منبثقة للطباعة'); return; }
+  w.document.write(`
+    <html dir="rtl"><head><meta charset="utf-8"><title>بطاقات مجموعة</title>
+    <style>
+      body{font-family:'Tahoma',sans-serif; margin:0; padding:16px; background:#fff;}
+      .grid{display:grid; grid-template-columns:repeat(3, 1fr); gap:14px;}
+      .card{border:1.5px solid #2F5D50; border-radius:14px; padding:12px; text-align:center; page-break-inside:avoid;}
+      .card .photo{width:44px; height:44px; border-radius:50%; object-fit:cover; margin-bottom:4px;}
+      .card img.qr{width:110px; height:110px; margin:6px auto; display:block;}
+      .card h3{margin:4px 0 2px; color:#2F5D50; font-size:13px;}
+      .card .code{font-family:monospace; font-size:11px; color:#555;}
+      @media print{ .grid{grid-template-columns:repeat(3, 1fr);} }
+    </style></head>
+    <body>
+      <div class="grid">${cardsHtml}</div>
+      <script>window.onload=function(){ setTimeout(function(){ window.print(); }, 500); };</script>
+    </body></html>
+  `);
+  w.document.close();
+}
+window.printCardsGrid = printCardsGrid;
 window.previewAvatarClick = previewAvatarClick;
 /* ---- إشعارات المتصفح (تشتغل والتاب فاتح فى الخلفية بس — مفيش سيرفر بريد/Push حقيقي) ---- */
 function enableBrowserNotifications(){
@@ -2675,6 +2709,18 @@ function renderListTable(opts){
 
 /* ---------- Members ---------- */
 const Members = {};
+Members.toggleSelectAll = function(checked){
+  document.querySelectorAll('.member-select').forEach(cb=>{ cb.checked = checked; });
+};
+Members.printSelectedCards = function(){
+  const ids = Array.from(document.querySelectorAll('.member-select:checked')).map(cb=>cb.value);
+  if(!ids.length){ toast('حدد مخدوم واحد على الأقل بالخانة اللي جنب كل اسم'); return; }
+  const members = ids.map(id=>byId(DB.members,id)).filter(m=>m && m.code);
+  const skipped = ids.length - members.length;
+  if(!members.length){ toast('المخدومين المحددين لازم يكون عندهم كود مسجّل'); return; }
+  printCardsGrid(members);
+  if(skipped) toast(`تم تجاهل ${skipped} مخدوم بدون كود مسجّل`);
+};
 Members.printCard = function(id){
   const m = byId(DB.members, id);
   if(!m) return;
@@ -2713,9 +2759,24 @@ Members.showImportGuide = function(){
     </ul>
   `, `<button class="btn btn-ghost" onclick="UI.closeModal()">تمام، فهمت</button>`);
 };
+Members.exportCSV = function(){
+  const headers = 'الاسم,الكود,الهاتف,تاريخ الميلاد,الجنس,المرحلة,الصف,الفصل';
+  const rows = DB.members.map(m=>[
+    m.name||'', m.code||'', m.phone||'', m.birthDate||'', m.gender||'',
+    nameOf(DB.stages,m.stageId)==='—'?'':nameOf(DB.stages,m.stageId),
+    nameOf(DB.grades,m.gradeId)==='—'?'':nameOf(DB.grades,m.gradeId),
+    nameOf(DB.classes,m.classId)==='—'?'':nameOf(DB.classes,m.classId),
+  ].map(v=>`"${String(v).replace(/"/g,'""')}"`).join(','));
+  const csv = '\uFEFF'+headers+'\n'+rows.join('\n')+'\n';
+  const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'نسخة-احتياطية-مخدومين-'+todayISO()+'.csv';
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+};
 Members.downloadCsvTemplate = function(){
   const headers = 'الاسم,الكود,الهاتف,تاريخ الميلاد,الجنس,المرحلة,الصف,الفصل';
-  const example = 'مريم سمير,M-101,01012345678,2015-03-20,أنثى,'+(DB.stages[0]?.name||'ابتدائي')+',,';
   const csv = '\uFEFF'+headers+'\n'+example+'\n'; // BOM عشان الإكسل يفتح العربي صح
   const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
   const url = URL.createObjectURL(blob);
@@ -2761,7 +2822,7 @@ Members.importCSV = async function(file){
 Views.members = function(){
   listPage({
     title:'المخدومون', addLabel:'إضافة مخدوم', onAdd:'Members.openForm()',
-    extraButtonsHtml:`<button class="btn btn-ghost btn-sm" onclick="document.getElementById('members-csv-input').click()">📥 استيراد CSV</button><button class="btn btn-ghost btn-sm" title="دليل الاستخدام" onclick="Members.showImportGuide()">ℹ️ دليل</button><input type="file" id="members-csv-input" accept=".csv" style="display:none;" onchange="Members.importCSV(this.files[0])">`,
+    extraButtonsHtml:`<button class="btn btn-ghost btn-sm" onclick="document.getElementById('members-csv-input').click()">📥 استيراد CSV</button><button class="btn btn-ghost btn-sm" title="دليل الاستخدام" onclick="Members.showImportGuide()">ℹ️ دليل</button><input type="file" id="members-csv-input" accept=".csv" style="display:none;" onchange="Members.importCSV(this.files[0])"><button class="btn btn-gold btn-sm" onclick="Members.printSelectedCards()">🎫 طباعة بطاقات مجموعة</button>`,
     searchFields:['name','code','phone'],
     filtersHtml:`
       <select id="mf-stage" onchange="_lpRender()"><option value="">كل المراحل</option>${DB.stages.map(s=>`<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select>
@@ -2775,6 +2836,7 @@ Views.members = function(){
       return DB.members.filter(m=> (!stageF||m.stageId===stageF) && (!gradeF||m.gradeId===gradeF) && (!classF||m.classId===classF) );
     },
     columns:[
+      {h:'<input type="checkbox" onchange="Members.toggleSelectAll(this.checked)" title="تحديد الكل">', render:m=>`<input type="checkbox" class="member-select" value="${m.id}">`},
       {h:'الاسم', render:m=>`<div class="name-cell"><span class="avatar">${m.photo?`<img src="${m.photo}" data-photo="${m.photo}" onclick="previewAvatarClick(event)" style="cursor:zoom-in;">`:initials(m.name)}</span><span class="nm" onclick="App.navigate('memberProfile','${m.id}')">${esc(m.name)}</span></div>`},
       {h:'الكود', key:'code'},
       {h:'الجنس', key:'gender'},
@@ -2932,10 +2994,42 @@ Members.renderTab = function(m, records, evals, fups, acts){
 
 /* ---------- Servants ---------- */
 const Servants = {};
-Servants.printCard = function(id){
-  const s = byId(DB.servants, id);
-  if(!s) return;
-  printPersonCard(s, 'خادم');
+Servants.exportCSV = function(){
+  const headers = 'الاسم,الكود,الهاتف,الجنس';
+  const rows = DB.servants.map(s=>[s.name||'', s.code||'', s.phone||'', s.gender||''].map(v=>`"${String(v).replace(/"/g,'""')}"`).join(','));
+  const csv = '\uFEFF'+headers+'\n'+rows.join('\n')+'\n';
+  const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'نسخة-احتياطية-خدام-'+todayISO()+'.csv';
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+};
+Servants.importCSV = async function(file){
+  if(!file) return;
+  try{
+    let text = await file.text();
+    if(text.charCodeAt(0)===0xFEFF) text = text.slice(1);
+    const lines = text.split(/\r?\n/).filter(l=>l.trim());
+    if(!lines.length){ toast('الملف فاضي'); return; }
+    const startIdx = /اسم|name/i.test(lines[0]) ? 1 : 0;
+    const rows = lines.slice(startIdx).map(parseCsvLine).filter(r=>r[0]);
+    if(!rows.length){ toast('مفيش صفوف بيانات صالحة فى الملف'); return; }
+    if(!confirm(`هيتم استيراد ${rows.length} خادم جديد. متابعة؟`)) return;
+    const batch = writeBatch(dbFire);
+    let count = 0;
+    rows.forEach(r=>{
+      const [name, code, phone, gender] = r;
+      if(!name) return;
+      const ref = doc(collection(dbFire,'servants'));
+      batch.set(ref, { name, code: code||('S-'+Date.now().toString().slice(-6)+count), phone: phone||'', gender: gender||'', status:'active', churchId: CURRENT_CHURCH_ID, createdAt: Date.now() });
+      count++;
+    });
+    await batch.commit();
+    await log('استيراد خدام من CSV', count+' خادم');
+    toast(`تم استيراد ${count} خادم بنجاح`);
+    const inp = document.getElementById('servants-restore-input'); if(inp) inp.value='';
+  }catch(e){ console.error(e); toast('تعذر الاستيراد: '+e.message); }
 };
 Views.servants = function(){
   listPage({
@@ -3080,6 +3174,7 @@ Stages.saveStage = async function(id){
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
 };
 Stages.removeStage = async function(id){
+  if(DB.members.some(m=>m.stageId===id)){ toast('مينفعش تحذف المرحلة دي — فيها مخدومين مسجّلين عليها. نقّلهم لمرحلة تانية الأول.'); return; }
   if(!confirm('حذف المرحلة سيحذف كل الصفوف والفصول المرتبطة بها. متابعة؟')) return;
   try{
     const gradeIds = gradesOfStage(id).map(g=>g.id);
@@ -3106,6 +3201,7 @@ Stages.saveGrade = async function(id){
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
 };
 Stages.removeGrade = async function(id){
+  if(DB.members.some(m=>m.gradeId===id)){ toast('مينفعش تحذف الصف ده — فيه مخدومين مسجّلين عليه. نقّلهم لصف تاني الأول.'); return; }
   if(!confirm('حذف الصف الدراسي سيحذف الفصول المرتبطة به. متابعة؟')) return;
   try{
     await fsDeleteWhere('classes','gradeId',id);
@@ -3136,31 +3232,38 @@ Stages.saveClass = async function(id){
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
 };
 Stages.removeClass = async function(id){
+  if(DB.members.some(m=>m.classId===id)){ toast('مينفعش تحذف الفصل ده — فيه مخدومين مسجّلين عليه. نقّلهم لفصل تاني الأول.'); return; }
   if(!confirm('حذف الفصل؟')) return;
   try{ await fsDelete('classes', id); await log('حذف فصل', id); App.navigate('stages'); }
   catch(e){ console.error(e); toast('تعذر الحذف: '+e.message); }
 };
 /* قوالب أسماء صفوف دراسية شائعة، تُقترح تلقائيًا حسب اسم المرحلة (بند: ربط تسلسل المراحل بالصفوف) */
+function normalizeArabic(s){
+  return String(s||'').replace(/[أإآ]/g,'ا').replace(/ى/g,'ي').replace(/ة/g,'ه').trim();
+}
 const STAGE_GRADE_TEMPLATES = [
   {match:/حضان|روض|تمهيد/, grades:['تمهيدي أول','تمهيدي ثاني']},
-  {match:/ابتدائ/, grades:['أولى ابتدائي','تانية ابتدائي','تالتة ابتدائي','رابعة ابتدائي','خامسة ابتدائي','سادسة ابتدائي']},
-  {match:/اعداد|إعداد/, grades:['أولى إعدادي','تانية إعدادي','تالتة إعدادي']},
+  {match:/ابتدائ|ابتدايي/, grades:['أولى ابتدائي','تانية ابتدائي','تالتة ابتدائي','رابعة ابتدائي','خامسة ابتدائي','سادسة ابتدائي']},
+  {match:/اعداد/, grades:['أولى إعدادي','تانية إعدادي','تالتة إعدادي']},
   {match:/ثانو/, grades:['أولى ثانوي','تانية ثانوي','تالتة ثانوي']},
+  {match:/جامع/, grades:['الفرقة الأولى','الفرقة الثانية','الفرقة الثالثة','الفرقة الرابعة']},
+  {match:/شباب/, grades:['عام']},
 ];
 Stages.autoFillGrades = async function(stageId){
   const st = byId(DB.stages, stageId);
   if(!st) return;
-  const tpl = STAGE_GRADE_TEMPLATES.find(t=>t.match.test(st.name));
+  const nName = normalizeArabic(st.name);
+  const tpl = STAGE_GRADE_TEMPLATES.find(t=>t.match.test(nName));
   if(!tpl){ toast('مفيش قالب صفوف جاهز لاسم المرحلة ده — أضف الصفوف يدويًا من "+ إضافة صف دراسي"'); return; }
-  const existingNames = gradesOfStage(stageId).map(g=>g.name);
-  const toAdd = tpl.grades.filter(g=>!existingNames.includes(g));
+  const existingNamesNorm = gradesOfStage(stageId).map(g=>normalizeArabic(g.name));
+  const toAdd = tpl.grades.filter(g=>!existingNamesNorm.includes(normalizeArabic(g)));
   if(!toAdd.length){ toast('كل الصفوف الافتراضية لهذه المرحلة مضافة بالفعل'); return; }
   if(!confirm(`هيتم إضافة ${toAdd.length} صف دراسي تلقائيًا:\n${toAdd.join('، ')}\nمتابعة؟`)) return;
   try{
     const batch = writeBatch(dbFire);
     toAdd.forEach((name,i)=>{
       const ref = doc(collection(dbFire,'grades'));
-      batch.set(ref, {name, stageId, churchId:CURRENT_CHURCH_ID, order: existingNames.length+i});
+      batch.set(ref, {name, stageId, churchId:CURRENT_CHURCH_ID, order: existingNamesNorm.length+i});
     });
     await batch.commit();
     await log('توليد صفوف تلقائي', st.name);
@@ -3839,6 +3942,26 @@ Views.backup = function(){
       <input type="file" id="restore-file" accept="application/json">
       <br><button class="btn btn-danger" style="margin-top:10px;" onclick="BackupV.restore()">استعادة من الملف</button>
       <p class="muted" style="margin-top:16px;">ملاحظة: بيانات النظام محفوظة تلقائيًا وبشكل مستمر أثناء الاستخدام. هذه النسخة الاحتياطية اليدوية مخصصة للأرشفة أو النقل بين الأجهزة.</p>
+    </div>
+
+    <div class="section-head" style="margin-top:22px;"><h2>نسخ احتياطية منفصلة (Excel/CSV)</h2></div>
+    <div class="info-card-grid">
+      <div class="card card-pad">
+        <h3 style="font-size:14px;">المخدومون</h3>
+        <button class="btn btn-primary btn-sm" onclick="Members.exportCSV()">⬇️ تصدير المخدومين (CSV)</button>
+        <div style="margin-top:10px;">
+          <input type="file" id="members-restore-input" accept=".csv" style="display:none;" onchange="Members.importCSV(this.files[0])">
+          <button class="btn btn-danger btn-sm" onclick="document.getElementById('members-restore-input').click()">⬆️ استرداد من ملف CSV</button>
+        </div>
+      </div>
+      <div class="card card-pad">
+        <h3 style="font-size:14px;">الخدام</h3>
+        <button class="btn btn-primary btn-sm" onclick="Servants.exportCSV()">⬇️ تصدير الخدام (CSV)</button>
+        <div style="margin-top:10px;">
+          <input type="file" id="servants-restore-input" accept=".csv" style="display:none;" onchange="Servants.importCSV(this.files[0])">
+          <button class="btn btn-danger btn-sm" onclick="document.getElementById('servants-restore-input').click()">⬆️ استرداد من ملف CSV</button>
+        </div>
+      </div>
     </div>
   `;
 };
