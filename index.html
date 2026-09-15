@@ -206,6 +206,18 @@
 
 <div id="offline-badge" style="display:none; position:fixed; bottom:16px; left:16px; z-index:300; background:#33383D; color:#fff; padding:8px 16px; border-radius:99px; font-size:12.5px; box-shadow:0 6px 16px rgba(0,0,0,.25);">📴 غير متصل بالإنترنت — التغييرات هتتزامن تلقائيًا لما النت يرجع</div>
 
+<div class="modal-backdrop" id="scanner-overlay" style="z-index:400;">
+  <div class="modal" style="max-width:420px;">
+    <div class="modal-head"><h3>قراءة باركود / QR</h3><button class="modal-close" onclick="Scanner.close()">✕</button></div>
+    <div class="modal-body">
+      <video id="scanner-video" style="width:100%; border-radius:10px; background:#000;" playsinline muted></video>
+      <canvas id="scanner-canvas" style="display:none;"></canvas>
+      <p class="muted" id="scanner-hint" style="margin-top:10px; text-align:center;">وجّه الكاميرا نحو الكود...</p>
+    </div>
+    <div class="modal-foot"><button class="btn btn-ghost btn-block" onclick="Scanner.close()">إلغاء</button></div>
+  </div>
+</div>
+
 <div class="modal-backdrop" id="modal-backdrop" onclick="if(event.target===this) UI.closeModal()">
   <div class="modal" id="modal-box">
     <div class="modal-head">

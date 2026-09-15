@@ -84,12 +84,9 @@ function clearPhotoField(){
 /* ---- قراءة باركود/QR بكاميرا الجهاز (تُستخدم في نماذج الكود وتسجيل الحضور) ---- */
 const Scanner = {};
 Scanner.open = function(onResult){
-  UI.openModal('قراءة باركود / QR', `
-    <video id="scanner-video" style="width:100%; border-radius:10px; background:#000;" playsinline muted></video>
-    <canvas id="scanner-canvas" style="display:none;"></canvas>
-    <p class="muted" id="scanner-hint" style="margin-top:10px; text-align:center;">وجّه الكاميرا نحو الكود...</p>
-  `, `<button class="btn btn-ghost btn-block" onclick="Scanner.close()">إلغاء</button>`);
   Scanner._onResult = onResult;
+  document.getElementById('scanner-hint').textContent = 'وجّه الكاميرا نحو الكود...';
+  document.getElementById('scanner-overlay').classList.add('open');
   Scanner._start();
 };
 Scanner._stream = null;
@@ -104,7 +101,7 @@ Scanner._start = async function(){
     const stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}});
     Scanner._stream = stream;
     const video = document.getElementById('scanner-video');
-    if(!video){ stream.getTracks().forEach(t=>t.stop()); return; } // المودال اتقفل قبل ما الكاميرا تجهز
+    if(!video || !document.getElementById('scanner-overlay').classList.contains('open')){ stream.getTracks().forEach(t=>t.stop()); return; } // النافذة اتقفلت قبل ما الكاميرا تجهز
     video.srcObject = stream;
     await video.play();
     Scanner._tick();
@@ -114,9 +111,10 @@ Scanner._start = async function(){
   }
 };
 Scanner._tick = function(){
+  if(!document.getElementById('scanner-overlay').classList.contains('open')) return; // اتقفلت
   const video = document.getElementById('scanner-video');
   const canvas = document.getElementById('scanner-canvas');
-  if(!video || !canvas) return; // المودال اتقفل
+  if(!video || !canvas) return;
   if(video.readyState !== video.HAVE_ENOUGH_DATA){ Scanner._raf = requestAnimationFrame(Scanner._tick); return; }
   canvas.width = video.videoWidth; canvas.height = video.videoHeight;
   const ctx = canvas.getContext('2d');
@@ -136,7 +134,8 @@ Scanner.close = function(){
   Scanner._raf = null;
   if(Scanner._stream) Scanner._stream.getTracks().forEach(t=>t.stop());
   Scanner._stream = null;
-  UI.closeModal();
+  const overlay = document.getElementById('scanner-overlay');
+  if(overlay) overlay.classList.remove('open');
 };
 /* ---- عرض مرفقات الشات كأيقونة صغيرة بدل صورة كبيرة، مع نافذة معاينة + تحميل/مشاركة ---- */
 function chatAttachmentThumb(img){
@@ -509,6 +508,8 @@ window.deleteChatMessage = deleteChatMessage;
 function stopScannerIfActive(){
   if(window.Scanner && Scanner._stream){ Scanner._stream.getTracks().forEach(t=>t.stop()); Scanner._stream=null; }
   if(window.Scanner && Scanner._raf){ cancelAnimationFrame(Scanner._raf); Scanner._raf=null; }
+  const scannerOverlay = document.getElementById('scanner-overlay');
+  if(scannerOverlay) scannerOverlay.classList.remove('open');
 }
 document.addEventListener('visibilitychange', ()=>{ if(document.hidden) stopScannerIfActive(); });
 window.addEventListener('pagehide', stopScannerIfActive);
@@ -2474,6 +2475,8 @@ UI.closeModal = function(){
   // إغلاق كاميرا الباركود تلقائيًا لو كانت شغالة، لتجنب استهلاك البطارية/سخونة الجهاز فى الخلفية
   if(window.Scanner && Scanner._stream){ Scanner._stream.getTracks().forEach(t=>t.stop()); Scanner._stream=null; }
   if(window.Scanner && Scanner._raf){ cancelAnimationFrame(Scanner._raf); Scanner._raf=null; }
+  const scannerOverlay = document.getElementById('scanner-overlay');
+  if(scannerOverlay) scannerOverlay.classList.remove('open');
 };
 /* معاينة صورة مكبّرة داخل مودال (تُستخدم لمرفقات طرق الدفع وإثباتات الدفع) */
 UI.previewImage = function(src){
