@@ -269,7 +269,7 @@ function memberPickerHtml(fieldId, selectedId){
       <select id="${fieldId}-stage" onchange="mpOnStageChange('${fieldId}')" style="min-width:120px;">${selectOptions(DB.stages,'','كل المراحل')}</select>
       <select id="${fieldId}-grade" onchange="mpOnGradeChange('${fieldId}')" style="min-width:120px;"><option value="">كل الصفوف</option></select>
       <select id="${fieldId}-class" onchange="mpRenderResults('${fieldId}')" style="min-width:110px;"><option value="">كل الفصول</option></select>
-      <input id="${fieldId}-search" placeholder="بحث بالاسم أو الكود..." oninput="mpRenderResults('${fieldId}')" style="flex:1; min-width:140px;">
+      <input id="${fieldId}-search" placeholder="بحث بالاسم أو الكود..." oninput="mpRenderResults('${fieldId}')" onkeydown="if(event.key==='Enter'){ mpSelectByCode('${fieldId}', this.value); this.value=''; }" style="flex:1; min-width:140px;">
       <button type="button" class="btn btn-ghost btn-sm" onclick="Scanner.open(v=>mpSelectByCode('${fieldId}', v))">📷</button>
     </div>
     <input type="hidden" id="${fieldId}" value="${selectedId||''}">
@@ -2572,7 +2572,8 @@ Views.dashboard = function(){
         ${needFollowup.length? `<table><tbody>${needFollowup.slice(0,6).map(m=>`
           <tr><td class="name-cell"><span class="avatar">${initials(m.name)}</span><span class="nm" onclick="App.navigate('memberProfile','${m.id}')">${esc(m.name)}</span></td>
           <td class="muted">${esc(nameOf(D.classes,m.classId))}</td>
-          <td><span class="pill pill-absent">${m.reason}</span></td></tr>`).join('')}</tbody></table>`
+          <td><span class="pill pill-absent">${m.reason}</span></td>
+          <td>${(m.phone||m.guardianPhone)? `<a href="${waLink(m.phone||m.guardianPhone, 'سلام ونعمة، حابين نطمّن على '+m.name+' لأننا لاحظنا غيابه عن مدرسة الأحد 🙏')}" target="_blank" class="btn btn-ghost btn-sm" title="تواصل واتساب">💬</a>` : ''}</td></tr>`).join('')}</tbody></table>`
           : `<p class="muted">لا يوجد حاليًا مخدومون بحاجة لمتابعة عاجلة 🎉</p>`}
       </div>
       <div class="card card-pad">
@@ -2728,6 +2729,80 @@ Members.printCard = function(id){
   const m = byId(DB.members, id);
   if(!m) return;
   printPersonCard(m, esc(nameOf(DB.stages,m.stageId))+' — '+esc(nameOf(DB.classes,m.classId)));
+};
+Members.openLinkSibling = function(memberId){
+  UI.openModal('ربط أخ/أخت', `
+    <p class="muted" style="margin-bottom:10px;">ابحث عن المخدوم التاني اللي عايز تربطه كأخ/أخت.</p>
+    ${memberPickerHtml('f-sibling', '')}
+  `, `<button class="btn btn-primary" onclick="Members.saveLinkSibling('${memberId}')">ربط</button><button class="btn btn-ghost" onclick="UI.closeModal()">إلغاء</button>`);
+};
+Members.saveLinkSibling = async function(memberId){
+  const siblingId = document.getElementById('f-sibling').value;
+  if(!siblingId){ toast('اختار المخدوم الأول'); return; }
+  if(siblingId===memberId){ toast('متقدرش تربط المخدوم بنفسه'); return; }
+  try{
+    const m = byId(DB.members, memberId);
+    const sib = byId(DB.members, siblingId);
+    const mSiblings = Array.from(new Set([...(m.siblingIds||[]), siblingId]));
+    const sSiblings = Array.from(new Set([...(sib.siblingIds||[]), memberId]));
+    await Promise.all([
+      updateDoc(doc(dbFire,'members',memberId), {siblingIds: mSiblings}),
+      updateDoc(doc(dbFire,'members',siblingId), {siblingIds: sSiblings}),
+    ]);
+    UI.closeModal(); toast('تم الربط');
+    App.navigate('memberProfile', memberId);
+  }catch(e){ console.error(e); toast('تعذر الربط: '+e.message); }
+};
+Members.unlinkSibling = async function(memberId, siblingId){
+  if(!confirm('فك الربط بين الاتنين؟')) return;
+  try{
+    const m = byId(DB.members, memberId);
+    const sib = byId(DB.members, siblingId);
+    await Promise.all([
+      updateDoc(doc(dbFire,'members',memberId), {siblingIds: (m.siblingIds||[]).filter(x=>x!==siblingId)}),
+      sib ? updateDoc(doc(dbFire,'members',siblingId), {siblingIds: (sib.siblingIds||[]).filter(x=>x!==memberId)}) : Promise.resolve(),
+    ]);
+    toast('تم فك الربط');
+    App.navigate('memberProfile', memberId);
+  }catch(e){ console.error(e); toast('تعذر فك الربط: '+e.message); }
+};
+Members.printCertificate = function(id){
+  const m = byId(DB.members, id);
+  if(!m) return;
+  const churchName = (DB.settings && DB.settings.churchName) || 'كنيستنا';
+  const schoolName = (DB.settings && DB.settings.schoolName) || 'مدرسة الأحد';
+  const w = window.open('', '_blank');
+  if(!w){ toast('برجاء السماح بفتح نوافذ منبثقة للطباعة'); return; }
+  w.document.write(`
+    <html dir="rtl"><head><meta charset="utf-8"><title>شهادة — ${esc(m.name)}</title>
+    <style>
+      body{font-family:'Tahoma',sans-serif; display:flex; align-items:center; justify-content:center; min-height:100vh; margin:0; background:#f4f5f2;}
+      .cert{width:720px; border:10px double #B08D57; border-radius:6px; padding:50px 60px; text-align:center; background:#fffdfa;}
+      .cert .ic{font-size:44px; margin-bottom:10px;}
+      .cert h1{color:#2F5D50; font-family:'Georgia',serif; font-size:26px; margin:0 0 6px;}
+      .cert .sub{color:#8A5A20; font-size:13px; margin-bottom:28px;}
+      .cert .name{font-size:32px; font-weight:800; color:#2F5D50; margin:18px 0; border-bottom:2px solid #B08D57; display:inline-block; padding-bottom:8px;}
+      .cert p{font-size:15px; color:#333; line-height:2;}
+      .cert .foot{display:flex; justify-content:space-between; margin-top:50px; font-size:12.5px; color:#555;}
+      @media print{ body{background:#fff;} }
+    </style></head>
+    <body>
+      <div class="cert">
+        <div class="ic">🏆</div>
+        <h1>شهادة تقدير</h1>
+        <div class="sub">${esc(churchName)} — ${esc(schoolName)}</div>
+        <p>تتقدّم إدارة ${esc(schoolName)} بخالص الشكر والتقدير إلى</p>
+        <div class="name">${esc(m.name)}</div>
+        <p>وذلك تقديرًا لالتزامه وحضوره المميز خلال هذا العام،<br>سائلين الله أن يبارك حياته ويديم عليه نعمة الحضور والخدمة.</p>
+        <div class="foot">
+          <span>التاريخ: ${esc(fmtDate(todayISO()))}</span>
+          <span>توقيع المسؤول: ....................</span>
+        </div>
+      </div>
+      <script>window.onload=function(){ setTimeout(function(){ window.print(); }, 400); };</script>
+    </body></html>
+  `);
+  w.document.close();
 };
 /* استيراد جماعي من CSV — الأعمدة المتوقعة (بالترتيب): الاسم, الكود, الهاتف, تاريخ الميلاد(YYYY-MM-DD), الجنس, المرحلة, الصف, الفصل
    المرحلة/الصف/الفصل لازم تتطابق بالاسم بالظبط مع الموجود عندك بالفعل، وإلا هيتسجّل المخدوم من غيرهم. */
@@ -2886,12 +2961,18 @@ Members._refreshClassOptions = function(){
 Members.save = async function(id){
   const name = document.getElementById('f-name').value.trim();
   if(!name){ toast('من فضلك أدخل الاسم'); return; }
+  const phone = document.getElementById('f-phone').value.trim();
+  // كشف تكرار محتمل: نفس الاسم بالظبط، أو نفس رقم الهاتف (غير فاضي)، فى مخدوم تاني غير اللي بنعدّله دلوقتي
+  if(!id){
+    const dup = DB.members.find(m=> m.name.trim()===name || (phone && m.phone && m.phone.trim()===phone));
+    if(dup && !confirm(`فيه مخدوم مسجّل بالفعل بنفس ${dup.name===name?'الاسم':'رقم الهاتف'}: "${dup.name}"${dup.code?' (كود '+dup.code+')':''}.\nمتأكد إنك عايز تضيف مخدوم جديد تاني؟`)) return;
+  }
   const data = {
     name, code:document.getElementById('f-code').value.trim(), birthDate:document.getElementById('f-birth').value,
     photo: document.getElementById('f-photo-data').value,
     gender:document.getElementById('f-gender').value, stageId:document.getElementById('f-stage').value,
     gradeId:document.getElementById('f-grade').value,
-    classId:document.getElementById('f-class').value, phone:document.getElementById('f-phone').value.trim(),
+    classId:document.getElementById('f-class').value, phone,
     email:document.getElementById('f-email').value.trim(), guardianName:document.getElementById('f-guardian').value.trim(),
     guardianPhone:document.getElementById('f-guardianphone').value.trim(), address:document.getElementById('f-address').value.trim(),
     status:document.getElementById('f-status').value, notes:document.getElementById('f-notes').value.trim(),
@@ -2937,6 +3018,7 @@ Views.memberProfile = function(id){
         </div>
         <button class="btn btn-ghost btn-sm no-print" onclick="Members.openForm('${m.id}')">تعديل البيانات</button>
         <button class="btn btn-gold btn-sm no-print" onclick="Members.printCard('${m.id}')">🎫 طباعة بطاقة</button>
+        <button class="btn btn-ghost btn-sm no-print" onclick="Members.printCertificate('${m.id}')">📜 طباعة شهادة</button>
       </div>
       <div class="stat-grid">
         ${statCard('نسبة الحضور', pct+'%','good')}
@@ -2968,6 +3050,20 @@ Members.renderTab = function(m, records, evals, fups, acts){
         <b>ولي الأمر</b><span>${esc(m.guardianName||'—')} — ${esc(m.guardianPhone||'—')}</span>
       </div></div>
       <div><h3>ملاحظات</h3><p class="muted">${esc(m.notes)||'لا توجد ملاحظات.'}</p></div>
+      <div>
+        <h3>👨‍👩‍👧‍👦 الإخوة</h3>
+        <div id="siblings-box">
+          ${(m.siblingIds||[]).length ? (m.siblingIds||[]).map(sid=>{
+            const sib = byId(DB.members, sid);
+            if(!sib) return '';
+            return `<div style="display:flex; justify-content:space-between; align-items:center; padding:6px 0; border-bottom:1px solid var(--line);">
+              <span class="nm" onclick="App.navigate('memberProfile','${sid}')">${esc(sib.name)}</span>
+              <a style="cursor:pointer; color:var(--absent); font-size:12px;" onclick="Members.unlinkSibling('${m.id}','${sid}')">✖ فك الربط</a>
+            </div>`;
+          }).join('') : `<p class="muted">لا يوجد إخوة مربوطين.</p>`}
+        </div>
+        <button class="btn btn-ghost btn-sm no-print" style="margin-top:10px;" onclick="Members.openLinkSibling('${m.id}')">➕ ربط أخ/أخت</button>
+      </div>
     </div>`;
   } else if(CURRENT_MEMBER_TAB==='attendance'){
     el.innerHTML = records.length ? `<table><thead><tr><th>التاريخ</th><th>الحالة</th></tr></thead><tbody>
@@ -3098,8 +3194,13 @@ Servants._refreshClass = function(){
 Servants.save = async function(id){
   const name = document.getElementById('f-name').value.trim();
   if(!name){ toast('من فضلك أدخل الاسم'); return; }
+  const phone = document.getElementById('f-phone').value.trim();
+  if(!id){
+    const dup = DB.servants.find(s=> s.name.trim()===name || (phone && s.phone && s.phone.trim()===phone));
+    if(dup && !confirm(`فيه خادم مسجّل بالفعل بنفس ${dup.name===name?'الاسم':'رقم الهاتف'}: "${dup.name}".\nمتأكد إنك عايز تضيف خادم جديد تاني؟`)) return;
+  }
   const data = {
-    name, code:document.getElementById('f-code').value.trim(), phone:document.getElementById('f-phone').value.trim(),
+    name, code:document.getElementById('f-code').value.trim(), phone,
     photo: document.getElementById('f-photo-data').value,
     gender:document.getElementById('f-gender').value,
     startDate:document.getElementById('f-start').value, stageId:document.getElementById('f-stage').value,
@@ -3130,6 +3231,7 @@ Views.stages = function(){
         <button class="btn btn-gold btn-sm" onclick="Stages.openStageForm()">+ إضافة مرحلة</button>
         <button class="btn btn-ghost btn-sm" onclick="Stages.openGradeForm()">+ إضافة صف دراسي</button>
         <button class="btn btn-ghost btn-sm" onclick="Stages.openClassForm()">+ إضافة فصل</button>
+        <button class="btn btn-primary btn-sm" onclick="Stages.showPromotion()">🎓 الترقية السنوية</button>
       </div>
     </div>
     <div class="info-card-grid">
@@ -3241,6 +3343,14 @@ Stages.removeClass = async function(id){
   catch(e){ console.error(e); toast('تعذر الحذف: '+e.message); }
 };
 /* قوالب أسماء صفوف دراسية شائعة، تُقترح تلقائيًا حسب اسم المرحلة (بند: ربط تسلسل المراحل بالصفوف) */
+/* تحويل رقم هاتف محلي مصري (01xxxxxxxxx) لرابط واتساب دولي صحيح (بيقبل أرقام دولية جاهزة برضو) */
+function waLink(phone, message){
+  let p = String(phone||'').replace(/[^\d]/g,'');
+  if(!p) return '';
+  if(p.startsWith('0')) p = '2'+p; // 01012345678 → 201012345678
+  else if(!p.startsWith('20') && p.length===10) p = '20'+p; // احتياط لأرقام من غير الصفر الأول
+  return 'https://wa.me/'+p+(message? '?text='+encodeURIComponent(message) : '');
+}
 function normalizeArabic(s){
   return String(s||'').replace(/[أإآ]/g,'ا').replace(/ى/g,'ي').replace(/ة/g,'ه').trim();
 }
@@ -3274,7 +3384,108 @@ Stages.autoFillGrades = async function(stageId){
   }catch(e){ console.error(e); toast('تعذر التوليد: '+e.message); }
 };
 
-/* ---------- Attendance ---------- */
+/* ---------- الترقية السنوية الجماعية ---------- */
+function suggestNextGrade(g){
+  const siblings = gradesOfStage(g.stageId); // مرتبة أصلًا حسب order
+  const idx = siblings.findIndex(x=>x.id===g.id);
+  if(idx>=0 && idx < siblings.length-1) return siblings[idx+1].id;
+  // آخر صف فى المرحلة دي → نجرّب أول صف فى المرحلة اللي بعدها فى الترتيب
+  const stageIdx = DB.stages.findIndex(s=>s.id===g.stageId);
+  for(let i=stageIdx+1; i<DB.stages.length; i++){
+    const nextGrades = gradesOfStage(DB.stages[i].id);
+    if(nextGrades.length) return nextGrades[0].id;
+  }
+  return '__graduate__'; // مفيش مرحلة بعدها فى الترتيب
+}
+function buildPromotionTargetOptions(suggested){
+  let html = `<option value="__none__" ${suggested==='__none__'?'selected':''}>— بدون نقل —</option>`;
+  DB.stages.forEach(st=>{
+    const grades = gradesOfStage(st.id);
+    if(!grades.length) return;
+    html += `<optgroup label="${esc(st.name)}">`;
+    grades.forEach(g=>{ html += `<option value="${g.id}" ${suggested===g.id?'selected':''}>${esc(g.name)}</option>`; });
+    html += `</optgroup>`;
+  });
+  html += `<option value="__graduate__" ${suggested==='__graduate__'?'selected':''}>🎓 تخرّج / إيقاف تفعيل</option>`;
+  return html;
+}
+Stages.showPromotion = function(){
+  const gradesWithMembers = DB.grades.map(g=>({
+    ...g,
+    count: DB.members.filter(m=>m.gradeId===g.id && m.status!=='inactive').length,
+    stage: byId(DB.stages, g.stageId),
+  })).filter(g=>g.count>0).sort((a,b)=>{
+    const sa = DB.stages.findIndex(s=>s.id===a.stageId), sb = DB.stages.findIndex(s=>s.id===b.stageId);
+    if(sa!==sb) return sa-sb;
+    return (a.order||0)-(b.order||0);
+  });
+  if(!gradesWithMembers.length){ toast('مفيش صفوف فيها مخدومين حاليًا عشان نرقّيهم'); return; }
+  const rowsHtml = gradesWithMembers.map(g=>`
+    <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; padding:9px 0; border-bottom:1px solid var(--line); flex-wrap:wrap;">
+      <div><b>${esc(g.stage?g.stage.name:'')} — ${esc(g.name)}</b> <span class="muted">(${g.count} مخدوم)</span></div>
+      <select id="promo-${g.id}" style="min-width:220px;">${buildPromotionTargetOptions(suggestNextGrade(g))}</select>
+    </div>
+  `).join('');
+  UI.openModal('🎓 الترقية السنوية', `
+    <p class="muted" style="margin-bottom:12px;">راجع وعدّل وجهة كل صف قبل التنفيذ. المخدوم هينتقل لنفس اسم الفصل فى الصف الجديد لو موجود بنفس الاسم، وإلا هيفضل الفصل فاضي وتحدده بعدين يدويًا.</p>
+    <div id="promo-rows">${rowsHtml}</div>
+  `, `<button class="btn btn-primary" onclick="Stages.previewPromotion()">👁 معاينة قبل التنفيذ</button><button class="btn btn-ghost" onclick="UI.closeModal()">إلغاء</button>`);
+};
+let PROMOTION_PLAN = null;
+Stages.previewPromotion = function(){
+  const gradesWithMembers = DB.grades.map(g=>({
+    ...g, count: DB.members.filter(m=>m.gradeId===g.id && m.status!=='inactive').length, stage: byId(DB.stages, g.stageId),
+  })).filter(g=>g.count>0);
+  const plan = gradesWithMembers.map(g=>{
+    const sel = document.getElementById('promo-'+g.id);
+    return {fromGrade:g, target: sel?sel.value:'__none__'};
+  }).filter(p=>p.target!=='__none__');
+  if(!plan.length){ toast('مفيش أي نقل محدد — كل الصفوف على "بدون نقل"'); return; }
+  const totalAffected = plan.reduce((s,p)=>s+p.fromGrade.count,0);
+  const summary = plan.map(p=>{
+    const label = p.target==='__graduate__' ? '🎓 تخرّج / إيقاف تفعيل' : (byId(DB.grades,p.target)?.name||'');
+    return `<div style="padding:6px 0; border-bottom:1px solid var(--line);">${esc(p.fromGrade.stage?p.fromGrade.stage.name:'')} — ${esc(p.fromGrade.name)} (${p.fromGrade.count} مخدوم) ← <b>${esc(label)}</b></div>`;
+  }).join('');
+  PROMOTION_PLAN = plan.map(p=>({gradeId:p.fromGrade.id, target:p.target}));
+  UI.openModal('معاينة الترقية السنوية', `
+    <p style="margin-bottom:10px;">الإجراء ده هيأثر على <b>${totalAffected} مخدوم</b> دفعة واحدة. راجع الخطة كويس قبل ما تأكد.</p>
+    ${summary}
+    <div class="field" style="margin-top:16px;"><label>اكتب "تأكيد" بالظبط للمتابعة</label><input id="promo-confirm-text" placeholder="تأكيد"></div>
+  `, `<button class="btn btn-danger" onclick="Stages.executePromotion()">🎓 تنفيذ الترقية الآن</button><button class="btn btn-ghost" onclick="Stages.showPromotion()">رجوع للتعديل</button>`);
+};
+Stages.executePromotion = async function(){
+  const confirmText = document.getElementById('promo-confirm-text').value.trim();
+  if(confirmText!=='تأكيد'){ toast('اكتب "تأكيد" بالظبط للمتابعة'); return; }
+  if(!PROMOTION_PLAN || !PROMOTION_PLAN.length) return;
+  try{
+    // نجمع كل التحديثات المطلوبة، ونقسّمها لدفعات (Firestore بيحدد حد أقصى 500 عملية للدفعة الواحدة)
+    const updates = [];
+    PROMOTION_PLAN.forEach(p=>{
+      const members = DB.members.filter(m=>m.gradeId===p.gradeId && m.status!=='inactive');
+      members.forEach(m=>{
+        if(p.target==='__graduate__'){
+          updates.push({id:m.id, data:{status:'inactive', gradeId:null, classId:null}});
+        } else {
+          const targetGrade = byId(DB.grades, p.target);
+          const currentClass = byId(DB.classes, m.classId);
+          const matchClass = currentClass ? DB.classes.find(c=>c.gradeId===p.target && c.name===currentClass.name) : null;
+          updates.push({id:m.id, data:{stageId: targetGrade?targetGrade.stageId:null, gradeId:p.target, classId: matchClass?matchClass.id:null}});
+        }
+      });
+    });
+    for(let i=0; i<updates.length; i+=450){
+      const chunk = updates.slice(i, i+450);
+      const batch = writeBatch(dbFire);
+      chunk.forEach(u=> batch.update(doc(dbFire,'members',u.id), u.data));
+      await batch.commit();
+    }
+    await log('ترقية سنوية جماعية', updates.length+' مخدوم');
+    PROMOTION_PLAN = null;
+    UI.closeModal();
+    toast(`تمت ترقية ${updates.length} مخدوم بنجاح`);
+    App.navigate('stages');
+  }catch(e){ console.error(e); toast('تعذر التنفيذ: '+e.message); }
+};
 Views.attendance = function(){
   const stageOpts = selectOptions(DB.stages,'', 'كل المراحل');
   $content().innerHTML = `
@@ -3562,7 +3773,7 @@ Activities.openForm = function(id){
       <div class="field full"><label>المشاركون</label>
         <div class="toolbar" style="margin-bottom:8px;">
           <select id="pt-stage" onchange="Activities.filterParticipants()" style="min-width:120px;">${selectOptions(DB.stages,'','كل المراحل')}</select>
-          <input id="pt-search" placeholder="بحث بالاسم أو الكود..." oninput="Activities.filterParticipants()" style="flex:1; min-width:140px;">
+          <input id="pt-search" placeholder="بحث بالاسم أو الكود..." oninput="Activities.filterParticipants()" onkeydown="if(event.key==='Enter'){ Activities.checkByCode(this.value); this.value=''; Activities.filterParticipants(); }" style="flex:1; min-width:140px;">
           <button type="button" class="btn btn-ghost btn-sm" onclick="Scanner.open(v=>Activities.checkByCode(v))">📷</button>
         </div>
         <div class="checklist" id="participants-checklist">${DB.members.map(m=>`<label data-name="${esc(m.name).toLowerCase()}" data-code="${esc(m.code||'').toLowerCase()}" data-stage="${m.stageId||''}"><input type="checkbox" value="${m.id}" ${(a.participants||[]).includes(m.id)?'checked':''} class="f-part"> ${esc(m.name)}</label>`).join('')}</div>
