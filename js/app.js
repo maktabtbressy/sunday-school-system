@@ -2825,25 +2825,27 @@ Members.showImportGuide = function(){
     <p style="font-size:13px; margin-top:14px;"><b>ترتيب الأعمدة المطلوب:</b></p>
     <div class="card" style="overflow-x:auto;">
       <table style="font-size:12px; white-space:nowrap;">
-        <thead><tr><th>الاسم</th><th>الكود</th><th>الهاتف</th><th>تاريخ الميلاد</th><th>الجنس</th><th>المرحلة</th><th>الصف</th><th>الفصل</th></tr></thead>
-        <tbody><tr><td>مريم سمير</td><td>M-101</td><td>01012345678</td><td>2015-03-20</td><td>أنثى</td><td>${esc(stageExamples)}</td><td>...</td><td>...</td></tr></tbody>
+        <thead><tr><th>الاسم</th><th>الكود</th><th>الهاتف</th><th>تاريخ الميلاد</th><th>الجنس</th><th>المرحلة</th><th>الصف</th><th>الفصل</th><th>البريد الإلكتروني</th><th>اسم ولي الأمر</th><th>هاتف ولي الأمر</th><th>العنوان</th><th>ملاحظات</th></tr></thead>
+        <tbody><tr><td>مريم سمير</td><td>M-101</td><td>01012345678</td><td>2015-03-20</td><td>أنثى</td><td>${esc(stageExamples)}</td><td>...</td><td>...</td><td>...</td><td>...</td><td>...</td><td>...</td><td>...</td></tr></tbody>
       </table>
     </div>
     <ul style="font-size:12.5px; color:var(--ink-soft); margin-top:12px; padding-inline-start:18px; line-height:1.8;">
       <li>عمود "الاسم" بس إلزامي — الباقي اختياري وتقدر تسيبه فاضي.</li>
       <li>تاريخ الميلاد لازم يكون بالشكل ده بالظبط: سنة-شهر-يوم (مثال: 2015-03-20).</li>
-      <li>أعمدة "المرحلة" و"الصف" و"الفصل" لازم تتكتب <b>بنفس الاسم المسجّل عندك بالظبط</b> في النظام (تقدر تتأكد من الأسماء من صفحة "المراحل والفصول")، وإلا المخدوم هيتسجّل من غيرهم وتقدر تحدد فصله بعدين يدويًا.</li>
+      <li>أعمدة "المرحلة" و"الصف" و"الفصل" لازم تتكتب <b>بنفس الاسم المسجّل عندك بالظبط</b> في النظام، وإلا المخدوم هيتسجّل من غيرهم وتقدر تحدد فصله بعدين يدويًا.</li>
+      <li>لو الكود (أو الاسم+الهاتف) بتاع صف موجود بالفعل عندك، النظام <b>هيحدّث بياناته بدل ما يضيفه تاني</b> — يعني تقدر ترفع الملف كذا مرة من غير خوف من التكرار، وربط الإخوة (لو موجود) هيفضل سليم.</li>
       <li>متغيّرش اسم الأعمدة (الصف الأول) في النموذج، وسيبه زي ما هو.</li>
     </ul>
   `, `<button class="btn btn-ghost" onclick="UI.closeModal()">تمام، فهمت</button>`);
 };
 Members.exportCSV = function(){
-  const headers = 'الاسم,الكود,الهاتف,تاريخ الميلاد,الجنس,المرحلة,الصف,الفصل';
+  const headers = 'الاسم,الكود,الهاتف,تاريخ الميلاد,الجنس,المرحلة,الصف,الفصل,البريد الإلكتروني,اسم ولي الأمر,هاتف ولي الأمر,العنوان,ملاحظات';
   const rows = DB.members.map(m=>[
     m.name||'', m.code||'', m.phone||'', m.birthDate||'', m.gender||'',
     nameOf(DB.stages,m.stageId)==='—'?'':nameOf(DB.stages,m.stageId),
     nameOf(DB.grades,m.gradeId)==='—'?'':nameOf(DB.grades,m.gradeId),
     nameOf(DB.classes,m.classId)==='—'?'':nameOf(DB.classes,m.classId),
+    m.email||'', m.guardianName||'', m.guardianPhone||'', m.address||'', m.notes||'',
   ].map(v=>`"${String(v).replace(/"/g,'""')}"`).join(','));
   const csv = '\uFEFF'+headers+'\n'+rows.join('\n')+'\n';
   const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
@@ -2854,7 +2856,8 @@ Members.exportCSV = function(){
   URL.revokeObjectURL(url);
 };
 Members.downloadCsvTemplate = function(){
-  const headers = 'الاسم,الكود,الهاتف,تاريخ الميلاد,الجنس,المرحلة,الصف,الفصل';
+  const headers = 'الاسم,الكود,الهاتف,تاريخ الميلاد,الجنس,المرحلة,الصف,الفصل,البريد الإلكتروني,اسم ولي الأمر,هاتف ولي الأمر,العنوان,ملاحظات';
+  const example = 'مريم سمير,M-101,01012345678,2015-03-20,أنثى,'+(DB.stages[0]?.name||'ابتدائي')+',,,,,,, ';
   const csv = '\uFEFF'+headers+'\n'+example+'\n'; // BOM عشان الإكسل يفتح العربي صح
   const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
   const url = URL.createObjectURL(blob);
@@ -2863,7 +2866,7 @@ Members.downloadCsvTemplate = function(){
   document.body.appendChild(a); a.click(); a.remove();
   URL.revokeObjectURL(url);
 };
-Members.importCSV = async function(file){
+Members.importCSV = async function(file, inputEl){
   if(!file) return;
   try{
     let text = await file.text();
@@ -2874,33 +2877,42 @@ Members.importCSV = async function(file){
     const startIdx = /اسم|name/i.test(lines[0]) ? 1 : 0;
     const rows = lines.slice(startIdx).map(parseCsvLine).filter(r=>r[0]);
     if(!rows.length){ toast('مفيش صفوف بيانات صالحة فى الملف'); return; }
-    if(!confirm(`هيتم استيراد ${rows.length} مخدوم جديد. متابعة؟`)) return;
+    if(!confirm(`هيتم معالجة ${rows.length} صف: المخدومين الموجودين بالفعل (بنفس الكود) هيتحدّثوا، والجداد هيتضافوا. متابعة؟`)) return;
     const batch = writeBatch(dbFire);
-    let count = 0;
+    let addedCount = 0, updatedCount = 0;
     rows.forEach(r=>{
-      const [name, code, phone, birthDate, gender, stageName, gradeName, className] = r;
+      const [name, code, phone, birthDate, gender, stageName, gradeName, className, email, guardianName, guardianPhone, address, notes] = r;
       if(!name) return;
       const stage = stageName ? DB.stages.find(s=>s.name===stageName) : null;
       const grade = gradeName ? DB.grades.find(g=>g.name===gradeName && (!stage||g.stageId===stage.id)) : null;
       const cls = className ? DB.classes.find(c=>c.name===className && (!grade||c.gradeId===grade.id)) : null;
-      const ref = doc(collection(dbFire,'members'));
-      batch.set(ref, {
-        name, code: code||('M-'+Date.now().toString().slice(-6)+count), phone: phone||'', birthDate: birthDate||'',
+      const data = {
+        name, code: code||undefined, phone: phone||'', birthDate: birthDate||'',
         gender: gender||'', stageId: stage?stage.id:null, gradeId: grade?grade.id:null, classId: cls?cls.id:null,
-        status:'active', churchId: CURRENT_CHURCH_ID, createdAt: Date.now(),
-      });
-      count++;
+        email: email||'', guardianName: guardianName||'', guardianPhone: guardianPhone||'', address: address||'', notes: notes||'',
+      };
+      // منع التكرار: لو فيه مخدوم بنفس الكود (أو بنفس الاسم+الهاتف لو مفيش كود) بنحدّث بياناته بدل ما نضيف نسخة جديدة
+      // — وده كمان بيحافظ على ربط الإخوة لأن المستند الأصلي (ID) مابيتغيرش
+      const existing = code ? DB.members.find(m=>m.code===code) : DB.members.find(m=>m.name===name && (!phone||m.phone===phone));
+      if(existing){
+        batch.update(doc(dbFire,'members',existing.id), data);
+        updatedCount++;
+      } else {
+        const ref = doc(collection(dbFire,'members'));
+        batch.set(ref, {...data, code: data.code||('M-'+Date.now().toString().slice(-6)+addedCount), status:'active', churchId: CURRENT_CHURCH_ID, createdAt: Date.now()});
+        addedCount++;
+      }
     });
     await batch.commit();
-    await log('استيراد مخدومين من CSV', count+' مخدوم');
-    toast(`تم استيراد ${count} مخدوم بنجاح`);
-    document.getElementById('members-csv-input').value = '';
+    await log('استيراد مخدومين من CSV', `${addedCount} إضافة، ${updatedCount} تحديث`);
+    toast(`تم: ${addedCount} مخدوم جديد + ${updatedCount} تحديث`);
+    if(inputEl) inputEl.value = '';
   }catch(e){ console.error(e); toast('تعذر الاستيراد: '+e.message); }
 };
 Views.members = function(){
   listPage({
     title:'المخدومون', addLabel:'إضافة مخدوم', onAdd:'Members.openForm()',
-    extraButtonsHtml:`<button class="btn btn-ghost btn-sm" onclick="document.getElementById('members-csv-input').click()">📥 استيراد CSV</button><button class="btn btn-ghost btn-sm" title="دليل الاستخدام" onclick="Members.showImportGuide()">ℹ️ دليل</button><input type="file" id="members-csv-input" accept=".csv" style="display:none;" onchange="Members.importCSV(this.files[0])"><button class="btn btn-gold btn-sm" onclick="Members.printSelectedCards()">🎫 طباعة بطاقات مجموعة</button>`,
+    extraButtonsHtml:`<button class="btn btn-ghost btn-sm" onclick="document.getElementById('members-csv-input').click()">📥 استيراد CSV</button><button class="btn btn-ghost btn-sm" title="دليل الاستخدام" onclick="Members.showImportGuide()">ℹ️ دليل</button><input type="file" id="members-csv-input" accept=".csv" style="display:none;" onchange="Members.importCSV(this.files[0], this)"><button class="btn btn-gold btn-sm" onclick="Members.printSelectedCards()">🎫 طباعة بطاقات مجموعة</button>`,
     searchFields:['name','code','phone'],
     filtersHtml:`
       <select id="mf-stage" onchange="_lpRender()"><option value="">كل المراحل</option>${DB.stages.map(s=>`<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select>
@@ -3094,8 +3106,14 @@ Members.renderTab = function(m, records, evals, fups, acts){
 /* ---------- Servants ---------- */
 const Servants = {};
 Servants.exportCSV = function(){
-  const headers = 'الاسم,الكود,الهاتف,الجنس';
-  const rows = DB.servants.map(s=>[s.name||'', s.code||'', s.phone||'', s.gender||''].map(v=>`"${String(v).replace(/"/g,'""')}"`).join(','));
+  const headers = 'الاسم,الكود,الهاتف,الجنس,تاريخ البدء,المرحلة,الصف,الفصل,ملاحظات';
+  const rows = DB.servants.map(s=>[
+    s.name||'', s.code||'', s.phone||'', s.gender||'', s.startDate||'',
+    nameOf(DB.stages,s.stageId)==='—'?'':nameOf(DB.stages,s.stageId),
+    nameOf(DB.grades,s.gradeId)==='—'?'':nameOf(DB.grades,s.gradeId),
+    nameOf(DB.classes,s.classId)==='—'?'':nameOf(DB.classes,s.classId),
+    s.notes||'',
+  ].map(v=>`"${String(v).replace(/"/g,'""')}"`).join(','));
   const csv = '\uFEFF'+headers+'\n'+rows.join('\n')+'\n';
   const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
   const url = URL.createObjectURL(blob);
@@ -3104,7 +3122,7 @@ Servants.exportCSV = function(){
   document.body.appendChild(a); a.click(); a.remove();
   URL.revokeObjectURL(url);
 };
-Servants.importCSV = async function(file){
+Servants.importCSV = async function(file, inputEl){
   if(!file) return;
   try{
     let text = await file.text();
@@ -3114,20 +3132,33 @@ Servants.importCSV = async function(file){
     const startIdx = /اسم|name/i.test(lines[0]) ? 1 : 0;
     const rows = lines.slice(startIdx).map(parseCsvLine).filter(r=>r[0]);
     if(!rows.length){ toast('مفيش صفوف بيانات صالحة فى الملف'); return; }
-    if(!confirm(`هيتم استيراد ${rows.length} خادم جديد. متابعة؟`)) return;
+    if(!confirm(`هيتم معالجة ${rows.length} صف: الخدام الموجودين بالفعل (بنفس الكود) هيتحدّثوا، والجداد هيتضافوا. متابعة؟`)) return;
     const batch = writeBatch(dbFire);
-    let count = 0;
+    let addedCount = 0, updatedCount = 0;
     rows.forEach(r=>{
-      const [name, code, phone, gender] = r;
+      const [name, code, phone, gender, startDate, stageName, gradeName, className, notes] = r;
       if(!name) return;
-      const ref = doc(collection(dbFire,'servants'));
-      batch.set(ref, { name, code: code||('S-'+Date.now().toString().slice(-6)+count), phone: phone||'', gender: gender||'', status:'active', churchId: CURRENT_CHURCH_ID, createdAt: Date.now() });
-      count++;
+      const stage = stageName ? DB.stages.find(s=>s.name===stageName) : null;
+      const grade = gradeName ? DB.grades.find(g=>g.name===gradeName && (!stage||g.stageId===stage.id)) : null;
+      const cls = className ? DB.classes.find(c=>c.name===className && (!grade||c.gradeId===grade.id)) : null;
+      const data = {
+        name, code: code||undefined, phone: phone||'', gender: gender||'', startDate: startDate||'',
+        stageId: stage?stage.id:null, gradeId: grade?grade.id:null, classId: cls?cls.id:null, notes: notes||'',
+      };
+      const existing = code ? DB.servants.find(s=>s.code===code) : DB.servants.find(s=>s.name===name && (!phone||s.phone===phone));
+      if(existing){
+        batch.update(doc(dbFire,'servants',existing.id), data);
+        updatedCount++;
+      } else {
+        const ref = doc(collection(dbFire,'servants'));
+        batch.set(ref, {...data, code: data.code||('S-'+Date.now().toString().slice(-6)+addedCount), status:'active', churchId: CURRENT_CHURCH_ID, createdAt: Date.now()});
+        addedCount++;
+      }
     });
     await batch.commit();
-    await log('استيراد خدام من CSV', count+' خادم');
-    toast(`تم استيراد ${count} خادم بنجاح`);
-    const inp = document.getElementById('servants-restore-input'); if(inp) inp.value='';
+    await log('استيراد خدام من CSV', `${addedCount} إضافة، ${updatedCount} تحديث`);
+    toast(`تم: ${addedCount} خادم جديد + ${updatedCount} تحديث`);
+    if(inputEl) inputEl.value = '';
   }catch(e){ console.error(e); toast('تعذر الاستيراد: '+e.message); }
 };
 Views.servants = function(){
@@ -4164,7 +4195,7 @@ Views.backup = function(){
         <h3 style="font-size:14px;">المخدومون</h3>
         <button class="btn btn-primary btn-sm" onclick="Members.exportCSV()">⬇️ تصدير المخدومين (CSV)</button>
         <div style="margin-top:10px;">
-          <input type="file" id="members-restore-input" accept=".csv" style="display:none;" onchange="Members.importCSV(this.files[0])">
+          <input type="file" id="members-restore-input" accept=".csv" style="display:none;" onchange="Members.importCSV(this.files[0], this)">
           <button class="btn btn-danger btn-sm" onclick="document.getElementById('members-restore-input').click()">⬆️ استرداد من ملف CSV</button>
         </div>
       </div>
@@ -4172,7 +4203,7 @@ Views.backup = function(){
         <h3 style="font-size:14px;">الخدام</h3>
         <button class="btn btn-primary btn-sm" onclick="Servants.exportCSV()">⬇️ تصدير الخدام (CSV)</button>
         <div style="margin-top:10px;">
-          <input type="file" id="servants-restore-input" accept=".csv" style="display:none;" onchange="Servants.importCSV(this.files[0])">
+          <input type="file" id="servants-restore-input" accept=".csv" style="display:none;" onchange="Servants.importCSV(this.files[0], this)">
           <button class="btn btn-danger btn-sm" onclick="document.getElementById('servants-restore-input').click()">⬆️ استرداد من ملف CSV</button>
         </div>
       </div>
