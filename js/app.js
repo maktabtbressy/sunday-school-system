@@ -3602,11 +3602,13 @@ Attendance.render = function(){
       <div class="section-head card-pad" style="margin-bottom:0;">
         <h2 style="font-size:14px;">${fmtDate(date)} — ${esc(nameOf(DB.classes,classId))} (${members.length} مخدوم)</h2>
         <div class="toolbar no-print">
+          <button class="btn btn-ghost btn-sm" onclick="Attendance.copyLast()">📋 نسخ حضور آخر مرة</button>
           <button class="btn btn-ghost btn-sm" onclick="Attendance.markAll(true)">تحديد الكل حاضر</button>
           <button class="btn btn-ghost btn-sm" onclick="Attendance.printRoster('${classId}','${date}')">🖨 طباعة كشف الفصل</button>
           <button class="btn btn-primary btn-sm" onclick="Attendance.saveAll()">حفظ الحضور</button>
         </div>
       </div>
+      <div id="att-copy-hint" class="muted no-print" style="display:none; padding:0 16px 12px; font-size:12.5px;"></div>
       <table><thead><tr><th>الاسم</th><th>الكود</th><th>الحالة</th></tr></thead>
       <tbody id="att-rows">
         ${members.map(m=>{
@@ -3674,6 +3676,34 @@ Attendance.markAll = function(present){
     const mid = tr.dataset.mid;
     tr.querySelector(`input[name="p-${mid}"][value="${present?1:0}"]`).checked = true;
   });
+};
+/* نسخ حضور آخر مرة: بيملا اختيارات (حاضر/غائب) على الشاشة من آخر جلسة متسجّلة لنفس الفصل قبل التاريخ المختار.
+   ما بيحفظش حاجة لوحده — المستخدم يراجع ويعدّل وبعدين يضغط "حفظ الحضور". المخدوم الجديد (مالوش سجل سابق) بيفضل زي ما هو. */
+Attendance.copyLast = function(){
+  const classId = document.getElementById('att-class').value;
+  const date = document.getElementById('att-date').value;
+  if(!classId || !date) return;
+  const earlier = DB.attendance.filter(a=> a.classId===classId && a.date && a.date < date);
+  if(!earlier.length){ toast('مفيش حضور متسجّل قبل التاريخ ده للفصل ده'); return; }
+  const srcDate = earlier.reduce((mx,a)=> a.date > mx ? a.date : mx, '');
+  const alreadySaved = DB.attendance.some(a=> a.classId===classId && a.date===date);
+  if(alreadySaved && !confirm('التاريخ ده متسجّل له حضور قبل كده. النسخ هيغيّر الاختيارات الظاهرة على الشاشة (ومش هيتحفظ غير لما تضغط "حفظ الحضور"). متابعة؟')) return;
+  const prev = {};
+  DB.attendance.forEach(a=>{ if(a.classId===classId && a.date===srcDate) prev[a.memberId] = !!a.present; });
+  let copied = 0, fresh = 0;
+  document.querySelectorAll('#att-rows tr').forEach(tr=>{
+    const mid = tr.dataset.mid;
+    if(Object.prototype.hasOwnProperty.call(prev, mid)){
+      const radio = tr.querySelector(`input[name="p-${mid}"][value="${prev[mid]?1:0}"]`);
+      if(radio){ radio.checked = true; copied++; }
+    } else fresh++;
+  });
+  const hint = document.getElementById('att-copy-hint');
+  if(hint){
+    hint.textContent = `📋 منسوخ من ${fmtDate(srcDate)} (${copied} مخدوم)` + (fresh ? ` — ${fresh} مخدوم بدون سجل سابق فضلوا زي ما هم` : '') + ' — لسه ماتحفظش: راجع واضغط "حفظ الحضور".';
+    hint.style.display = 'block';
+  }
+  toast(`تم نسخ حضور ${fmtDate(srcDate)} — راجع واضغط "حفظ الحضور"`);
 };
 Attendance.saveAll = async function(){
   const classId = document.getElementById('att-class').value;
