@@ -14,13 +14,58 @@ service cloud.firestore {
     function isChurchAdmin() { return isSignedIn() && myRole() == 'admin'; }
     function belongsToChurch(chId) { return isSignedIn() && myChurch() == chId; }
 
-    // ===== الكنايس (المستأجرين): قراءة عامة لأي مستخدم مسجّل (بيانات غير حساسة) =====
+    // ===== أدوات مساعدة للتحصين (Phase 1) =====
+    // الأدوار المسموح لمدير الكنيسة يمنحها داخل كنيسته فقط — أبدًا مش superadmin ولا subadmin
+    function churchRoles() { return ['admin', 'servant', 'staff']; }
+    function myEmail() { return request.auth.token.email.lower(); }
+    function inviteData(e) { return get(/databases/$(database)/documents/invites/$(e)).data; }
+    function churchData(id) { return get(/databases/$(database)/documents/churches/$(id)).data; }
+
+    // تسجيل كنيسة جديدة: المستخدم بيكتب مستنده كـ "admin" لكنيسة لسه pending
+    // وبريدها = بريده هو (يعني الكنيسة اللي أنشأها لسه قبل لحظات) — مفيش دور تاني يتكتب بالطريقة دي
+    function isNewChurchAdminDoc() {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['name', 'email', 'role', 'churchId'])
+        && d.role == 'admin'
+        && d.email.lower() == myEmail()
+        && d.churchId is string
+        && exists(/databases/$(database)/documents/churches/$(d.churchId))
+        && churchData(d.churchId).status == 'pending'
+        && churchData(d.churchId).contactEmail.lower() == myEmail();
+    }
+
+    // الانضمام بدعوة: الدور والكنيسة والصلاحيات لازم تطابق الدعوة الموجودة فعليًا على بريده بالظبط
+    function isInvitedJoinDoc() {
+      let d = request.resource.data;
+      let e = myEmail();
+      return d.keys().hasOnly(['name', 'email', 'role', 'churchId', 'permissions', 'jobTitle', 'phone'])
+        && d.email.lower() == e
+        && exists(/databases/$(database)/documents/invites/$(e))
+        && inviteData(e).get('used', false) != true
+        && d.role == inviteData(e).role
+        && d.role in ['admin', 'servant', 'staff', 'subadmin']
+        && d.get('churchId', null) == inviteData(e).get('churchId', null)
+        && d.get('permissions', null) == inviteData(e).get('permissions', null);
+    }
+
+    // ===== الكنايس (المستأجرين) =====
     match /churches/{chId} {
-      allow read: if isSignedIn();
-      // إنشاء كنيسة جديدة بيحصل وقت التسجيل الذاتي لمسؤول كنيسة جديدة
-      allow create: if isSignedIn();
-      // تعديل حالة الاشتراك/التفعيل مسموح للمالك، أو للأدمن الفرعي اللي عنده صلاحية "churches"
-      allow update: if isSuperAdmin() || subAdminCan('churches');
+      // بيانات الكنايس (تليفون/بريد/حالة الاشتراك) للإدارة وأعضاء الكنيسة نفسها فقط
+      allow read: if isPlatformStaff() || belongsToChurch(chId);
+      // إنشاء كنيسة جديدة بيحصل وقت التسجيل الذاتي: لازم تكون pending وبنفس الحقول والبريد بتاع صاحب الطلب
+      allow create: if isSuperAdmin() || (
+        isSignedIn()
+        && request.resource.data.keys().hasOnly(['name', 'contactPhone', 'contactEmail', 'status', 'createdAt'])
+        && request.resource.data.status == 'pending'
+        && request.resource.data.contactEmail.lower() == myEmail()
+      );
+      // تعديل حالة الاشتراك: المالك، أو أدمن فرعي بصلاحية churches،
+      // أو أدمن فرعي بصلاحية payments لتفعيل اشتراك بعد قبول دفعة (status/activeUntil بس)
+      allow update: if isSuperAdmin() || subAdminCan('churches') || (
+        subAdminCan('payments')
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'activeUntil'])
+        && request.resource.data.status == 'active'
+      );
       allow delete: if isSuperAdmin();
     }
 
@@ -31,10 +76,21 @@ service cloud.firestore {
         isSuperAdmin() ||
         (isChurchAdmin() && resource.data.churchId == myChurch())
       );
-      // إنشاء حساب جديد (تسجيل ذاتي لأول مرة) بيعمله الشخص لنفسه بس
-      allow create: if isSignedIn() && request.auth.uid == uid;
-      allow update, delete: if isSuperAdmin() ||
-        (isChurchAdmin() && resource.data.churchId == myChurch());
+      // إنشاء حساب: لنفسك بس، وبإحدى طريقتين محددتين فقط (تسجيل كنيسة جديدة أو دعوة حقيقية) —
+      // مفيش أي طريقة تخلّي حد يكتب لنفسه role: superadmin/subadmin بحرية
+      allow create: if isSignedIn() && request.auth.uid == uid && (isNewChurchAdminDoc() || isInvitedJoinDoc());
+      // مدير الكنيسة يعدّل/يحذف مستخدمي كنيسته فقط، ومايقدرش يغيّر كنيستهم ولا يديهم دور خارج (admin/servant/staff)
+      allow update: if isSuperAdmin() || (
+        isChurchAdmin()
+        && resource.data.churchId == myChurch()
+        && request.resource.data.churchId == resource.data.churchId
+        && request.resource.data.role in churchRoles()
+      );
+      allow delete: if isSuperAdmin() || (
+        isChurchAdmin()
+        && resource.data.churchId == myChurch()
+        && resource.data.role in churchRoles()
+      );
     }
 
     // ===== إعدادات كل كنيسة (مستند واحد لكل كنيسة، معرّفه = رقم الكنيسة) =====
@@ -87,38 +143,66 @@ service cloud.firestore {
       allow create: if isSignedIn() && (isSuperAdmin() || request.resource.data.churchId == myChurch());
     }
 
-    // ===== طرق الدفع (عامة للإدارة، تُعرض على كل الكنايس) =====
-    // ===== دعوات المستخدمين (مدير الكنيسة يدعو خدام/مستخدمين جدد بالبريد) =====
+    // ===== دعوات المستخدمين (بالبريد) =====
+    // القراءة: صاحب البريد المدعو نفسه (وقت الانضمام)، أو المالك، أو مدير نفس الكنيسة — مش أي مستخدم مسجّل
     match /invites/{emailId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn() && (isSuperAdmin() || (isChurchAdmin() && request.resource.data.churchId == myChurch()));
-      allow update: if isSignedIn();
-      allow delete: if isSignedIn() && (isSuperAdmin() || isChurchAdmin());
+      allow read: if isSignedIn() && (
+        myEmail() == emailId ||
+        isSuperAdmin() ||
+        (isChurchAdmin() && resource.data.churchId == myChurch())
+      );
+      // مدير الكنيسة يدعو لكنيسته بس وبأدوار (admin/servant/staff) — مايقدرش يدعو superadmin/subadmin
+      allow create: if isSuperAdmin() || (
+        isChurchAdmin()
+        && request.resource.data.churchId == myChurch()
+        && request.resource.data.role in churchRoles()
+      );
+      // التعديل: المالك، أو مدير نفس الكنيسة (إعادة دعوة بنفس البريد)، أو المدعو نفسه لتعليم الدعوة "مستخدمة" فقط
+      allow update: if isSuperAdmin() || (
+        isChurchAdmin()
+        && resource.data.churchId == myChurch()
+        && request.resource.data.churchId == myChurch()
+        && request.resource.data.role in churchRoles()
+      ) || (
+        myEmail() == emailId
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['used'])
+        && request.resource.data.used == true
+      );
+      allow delete: if isSuperAdmin() || (isChurchAdmin() && resource.data.churchId == myChurch());
     }
 
+    // ===== طرق الدفع (عامة للقراءة، تُعرض على كل الكنايس) =====
     match /paymentMethods/{docId} {
       allow read: if isSignedIn();
-      allow write: if isSuperAdmin();
+      allow write: if isSuperAdmin() || subAdminCan('settings');
 
       // مرفقات طريقة الدفع (زي صور QR متعددة)، مخزّنة في مجموعة فرعية
       // منفصلة عشان الصور الكبيرة ماتتكدسش في مستند واحد وتتخطى حد حجم المستند.
       match /attachments/{attId} {
         allow read: if isSignedIn();
-        allow write: if isSuperAdmin();
+        allow write: if isSuperAdmin() || subAdminCan('settings');
       }
     }
 
     // ===== إثباتات الدفع المرسلة من كل كنيسة =====
     match /paymentProofs/{docId} {
-      allow read: if isSignedIn() && (isSuperAdmin() || belongsToChurch(resource.data.churchId));
-      allow create: if isSignedIn() && (isSuperAdmin() || request.resource.data.churchId == myChurch());
+      allow read: if isSignedIn() && (isSuperAdmin() || subAdminCan('payments') || belongsToChurch(resource.data.churchId));
+      // الكنيسة ترسل إثبات جديد بحالة pending بس (مايقدرش يبعته "approved" بنفسه)
+      allow create: if isSignedIn() && (
+        isSuperAdmin() ||
+        (request.resource.data.churchId == myChurch() && request.resource.data.status == 'pending')
+      );
       allow update, delete: if isSuperAdmin() || subAdminCan('payments');
     }
 
     // ===== الدردشة بين كل كنيسة والمالك =====
     match /chatMessages/{docId} {
-      allow read: if isSignedIn() && (isSuperAdmin() || belongsToChurch(resource.data.churchId));
-      allow create: if isSignedIn() && (isSuperAdmin() || subAdminCan('support') || request.resource.data.churchId == myChurch());
+      allow read: if isSignedIn() && (isSuperAdmin() || subAdminCan('support') || belongsToChurch(resource.data.churchId));
+      // الكنيسة مايقدرش تبعت رسالة منتحلة صفة المالك (senderRole = superadmin)
+      allow create: if isSignedIn() && (
+        isSuperAdmin() || subAdminCan('support') ||
+        (request.resource.data.churchId == myChurch() && request.resource.data.senderRole != 'superadmin')
+      );
       // تحديث محصور فقط في وسم "تمت القراءة" — كل طرف يقدر يعلّم رسائل الطرف التاني بس كمقروءة،
       // ومحتوى الرسالة نفسه يفضل ثابت زي ما اتبعت (immutable).
       allow update: if isSignedIn() && (
@@ -130,15 +214,16 @@ service cloud.firestore {
         (belongsToChurch(resource.data.churchId) && resource.data.senderRole != 'superadmin')
       );
     }
-    // ===== أنواع التذاكر المتاحة (مستند واحد 'main' يديره المالك) =====
+
+    // ===== أنواع التذاكر المتاحة (مستند واحد 'main' يديره المالك أو دعم فني بصلاحية support) =====
     match /ticketTypes/{docId} {
       allow read: if isSignedIn();
-      allow write: if isSuperAdmin();
+      allow write: if isSuperAdmin() || subAdminCan('support');
     }
 
     // ===== تذاكر الدعم الفني/الشكاوى من كل كنيسة =====
     match /tickets/{docId} {
-      allow read: if isSignedIn() && (isSuperAdmin() || belongsToChurch(resource.data.churchId));
+      allow read: if isSignedIn() && (isSuperAdmin() || subAdminCan('support') || belongsToChurch(resource.data.churchId));
       allow create: if isSignedIn() && (isSuperAdmin() || request.resource.data.churchId == myChurch());
       // المالك يقدر يعدّل أي حاجة (الرد + الحالة). الكنيسة تقدر بس تلغي تذكرتها وهي لسه جديدة،
       // ومش تقدر تغيّر أي حقل تاني غير حالة الإلغاء وتنبيه المالك.
@@ -151,16 +236,22 @@ service cloud.firestore {
       );
       allow delete: if false;
     }
-    // ===== خطط الاشتراك (معلوماتية، يديرها المالك) =====
+
+    // ===== خطط الاشتراك (معلوماتية، يديرها المالك أو أدمن فرعي بصلاحية settings) =====
     match /subscriptionPlans/{docId} {
       allow read: if isSignedIn();
-      allow write: if isSuperAdmin();
+      allow write: if isSuperAdmin() || subAdminCan('settings');
     }
 
-    // ===== أكواد خصم/أيام إضافية على الاشتراك — المالك بس يقدر يقرأها أو يعدّلها
-    // (الكنيسة بتكتب الكود كنص عادي مع طلب الدفع، مش بتقرأ قائمة الأكواد) =====
+    // ===== أكواد خصم/أيام إضافية على الاشتراك =====
+    // (الكنيسة بتكتب الكود كنص عادي مع طلب الدفع، مش بتقرأ قائمة الأكواد)
+    // أدمن فرعي بصلاحية payments يقرأ الأكواد ويزوّد usedCount بس عند قبول دفعة؛ التعديل الكامل للمالك/settings
     match /discountCodes/{docId} {
-      allow read, write: if isSuperAdmin();
+      allow read: if isSuperAdmin() || subAdminCan('settings') || subAdminCan('payments');
+      allow create, delete: if isSuperAdmin() || subAdminCan('settings');
+      allow update: if isSuperAdmin() || subAdminCan('settings') || (
+        subAdminCan('payments') && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['usedCount'])
+      );
     }
 
     // ===== سجل نشاط المالك (تتبع إجراءاته: قبول/رفض/تمديد/إعفاء... إلخ) =====
@@ -169,18 +260,23 @@ service cloud.firestore {
       allow write: if isSuperAdmin() || isSubAdmin();
     }
 
-    // ===== حالة الجلسة النشطة وطابور الانتظار فى الدردشة (نظام الأدوار) =====
-    // مستند واحد بيتشارك فيه الجميع، وأي طرف (كنيسة أو مالك) محتاج يقدر يعدّله
-    // (الكنيسة بتسجّل نفسها فى الطابور، والمالك بيدير مين النشط دلوقتي).
+    // ===== حالة الجلسة النشطة وطابور الانتظار فى الدردشة =====
+    // مستند واحد بيتشارك فيه الجميع (الكنيسة بتسجّل نفسها فى الطابور، والمالك بيدير مين النشط دلوقتي).
+    // مقصور على أصحاب مستند مستخدم حقيقي (مش أي حساب Auth جديد).
     match /platformConfig/chatSession {
       allow read: if isSignedIn();
-      allow write: if isSignedIn();
+      allow write: if userDocExists();
     }
 
-    // ===== إعدادات عامة للمنصة (زي رابط "تواصل معنا") — تظهر لأي زائر حتى قبل تسجيل الدخول =====
+    // ===== إعدادات عامة للمنصة — تظهر لأي زائر حتى قبل تسجيل الدخول =====
+    // (chatSession مستثنى من القراءة العامة؛ ليه قاعدته الخاصة فوق)
     match /platformConfig/{docId} {
-      allow read: if true;
-      allow write: if isSuperAdmin();
+      allow read: if docId != 'chatSession';
+      allow write: if docId != 'chatSession' && (
+        isSuperAdmin() ||
+        (docId == 'public' && subAdminCan('settings')) ||
+        (docId == 'decisionTemplates' && subAdminCan('churches'))
+      );
     }
 
     // ===== روابط إدارية سريعة (خاصة بالمالك فقط، زي روابط GitHub/Firebase) =====
