@@ -237,7 +237,8 @@ service cloud.firestore {
          request.resource.data.status == 'ملغاة' &&
          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','cancelledByChurch','readBySA']))
       );
-      allow delete: if false;
+      // الحذف للمالك فقط (لازم لـ "حذف الكنيسة نهائيًا" اللي بيمسح تذاكرها) — الكنايس نفسها مايقدرش تحذف تذكرة
+      allow delete: if isSuperAdmin();
     }
 
     // ===== خطط الاشتراك (معلوماتية، يديرها المالك أو أدمن فرعي بصلاحية settings) =====

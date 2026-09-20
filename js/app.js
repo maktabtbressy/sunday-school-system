@@ -358,6 +358,7 @@ let CHURCH_ACCESS_LOCKED = false; // true لو اشتراك الكنيسة من�
 const CHURCH_LOCKED_ALLOWED_PAGES = ['billing','chat','tickets'];
 let CURRENT_CHURCH = null;
 let REGISTERING = false; // true أثناء تنفيذ عملية تسجيل كنيسة جديدة (لتجاهل onAuthStateChanged المؤقت)
+let HOLD_AUTH_SCREEN_UNTIL = 0; // لحظة تنتهي عندها "إمساك" شاشة الرسالة بعد signOut (انظر showPendingAndSignOut)
 
 const TRIAL_DAYS = 14;
 
@@ -601,6 +602,14 @@ function showLockedScreen(msg){
   document.getElementById('locked-message').textContent = msg;
   document.getElementById('locked-screen').style.display='flex';
 }
+/* شاشة رسالة (قيد المراجعة / مرفوض / مفيش كنيسة) ثم تسجيل خروج.
+   signOut بيشغّل onAuthStateChanged(null) اللي بيرجّع شاشة الدخول ويخفي الرسالة فورًا،
+   فبنعلّم إن الـ callback اللي جاي (خلال 4 ثواني) خاص بالخروج ده ونسيب شاشة الرسالة ظاهرة. */
+async function showPendingAndSignOut(msg){
+  showPendingScreen(msg);
+  HOLD_AUTH_SCREEN_UNTIL = Date.now() + 4000;
+  try{ await signOut(auth); }catch(_){ HOLD_AUTH_SCREEN_UNTIL = 0; }
+}
 /* رسالة على شاشة الدخول ثم تسجيل خروج.
    signOut بيشغّل onAuthStateChanged(null) اللي بيرجّع شاشة الدخول ويخفي أي شاشة تانية،
    عشان كده الرسالة بتتحط في login-error (ما بيتمسحش) عشان تفضل ظاهرة للمستخدم. */
@@ -808,6 +817,7 @@ onAuthStateChanged(auth, async (fbUser) => {
   if(!fbUser){
     console.log('[AUTH] no fbUser -> showing login screen');
     CURRENT_USER = null; CURRENT_CHURCH_ID = null; CURRENT_CHURCH = null; CHURCH_ACCESS_LOCKED = false;
+    if(Date.now() < HOLD_AUTH_SCREEN_UNTIL){ HOLD_AUTH_SCREEN_UNTIL = 0; return; } // سيب شاشة الرسالة ظاهرة
     if(enforceMaintenanceGate()) return;
     hideAllAuthScreens();
     document.getElementById('login-screen').style.display='flex';
@@ -866,25 +876,21 @@ onAuthStateChanged(auth, async (fbUser) => {
     /* ----- باقي الأدوار: لازم تكون مرتبطة بكنيسة نشطة ----- */
     console.log('[AUTH] step 6b: not superadmin, churchId =', CURRENT_USER.churchId);
     if(!CURRENT_USER.churchId){
-      showPendingScreen('لا يوجد لك كنيسة مرتبطة بعد. تواصل مع الإدارة.');
-      await signOut(auth); return;
+      await showPendingAndSignOut('لا يوجد لك كنيسة مرتبطة بعد. تواصل مع الإدارة.'); return;
     }
     const churchSnap = await getDoc(doc(dbFire,'churches', CURRENT_USER.churchId));
     if(!churchSnap.exists()){
-      showPendingScreen('كنيستك غير موجودة في النظام. تواصل مع الإدارة.');
-      await signOut(auth); return;
+      await showPendingAndSignOut('كنيستك غير موجودة في النظام. تواصل مع الإدارة.'); return;
     }
     const church = churchSnap.data();
     CURRENT_CHURCH_ID = CURRENT_USER.churchId;
     CURRENT_CHURCH = church;
 
     if(church.status === 'pending'){
-      showPendingScreen('طلب تسجيل كنيسة "'+church.name+'" لسه قيد المراجعة من الإدارة، وهيتم التواصل معاكم بمجرد الموافقة.');
-      await signOut(auth); return;
+      await showPendingAndSignOut('طلب تسجيل كنيسة "'+church.name+'" لسه قيد المراجعة من الإدارة، وهيتم التواصل معاكم بمجرد الموافقة.'); return;
     }
     if(church.status === 'rejected'){
-      showPendingScreen('للأسف تم رفض طلب تسجيل كنيسة "'+church.name+'". تواصل مع الإدارة لمزيد من التفاصيل.');
-      await signOut(auth); return;
+      await showPendingAndSignOut('للأسف تم رفض طلب تسجيل كنيسة "'+church.name+'". تواصل مع الإدارة لمزيد من التفاصيل.'); return;
     }
     const now = Date.now();
     const trialEnd = church.trialEndsAt ? new Date(church.trialEndsAt).getTime() : 0;
@@ -1268,13 +1274,28 @@ SuperAdmin.deleteChurch = async function(id, name){
   if(typed !== name){ if(typed!==null) toast('الاسم مش مطابق، اتلغت العملية'); return; }
   try{
     toast('جاري حذف بيانات الكنيسة...');
-    const tenantCols = ['members','servants','stages','grades','classes','attendance','evaluations','followups','activities','auditLog','paymentProofs','chatMessages'];
+    const tenantCols = ['members','servants','stages','grades','classes','attendance','evaluations','followups','activities','auditLog','paymentProofs','chatMessages','tickets','invites'];
     for(const col of tenantCols){
       await fsDeleteWhere(col, 'churchId', id);
     }
     const usersSnap = await getDocs(query(collection(dbFire,'users'), where('churchId','==', id)));
     await Promise.all(usersSnap.docs.map(d=>deleteDoc(d.ref)));
     await deleteDoc(doc(dbFire,'settings', id));
+    // شيل الكنيسة من جلسة/طابور الدردشة لو كانت فيهم (عشان مايفضلش اسمها معلّق)
+    try{
+      const csRef = doc(dbFire,'platformConfig','chatSession');
+      const cs = await getDoc(csRef);
+      if(cs.exists()){
+        const d = cs.data();
+        const oldQueue = d.queue || [];
+        const queue = oldQueue.filter(x=>x!==id);
+        const wasActive = d.activeChurchId === id;
+        if(wasActive || queue.length !== oldQueue.length){
+          const activeChurchId = wasActive ? (queue.shift() || null) : d.activeChurchId;
+          await setDoc(csRef, {activeChurchId, queue}, {merge:true});
+        }
+      }
+    }catch(e){ console.warn('chat session cleanup skipped', e); }
     await deleteDoc(doc(dbFire,'churches', id));
     UI.closeModal();
     toast('تم حذف الكنيسة وكل بياناتها نهائيًا');
