@@ -601,6 +601,16 @@ function showLockedScreen(msg){
   document.getElementById('locked-message').textContent = msg;
   document.getElementById('locked-screen').style.display='flex';
 }
+/* رسالة على شاشة الدخول ثم تسجيل خروج.
+   signOut بيشغّل onAuthStateChanged(null) اللي بيرجّع شاشة الدخول ويخفي أي شاشة تانية،
+   عشان كده الرسالة بتتحط في login-error (ما بيتمسحش) عشان تفضل ظاهرة للمستخدم. */
+async function signOutWithNotice(msg){
+  hideAllAuthScreens();
+  const el = document.getElementById('login-error');
+  el.textContent = msg; el.style.display = 'block';
+  document.getElementById('login-screen').style.display = 'flex';
+  try{ await signOut(auth); }catch(_){}
+}
 function mapAuthError(e){
   const code = e && e.code || '';
   if(code==='auth/email-already-in-use') return 'البريد الإلكتروني ده مسجّل بالفعل';
@@ -633,11 +643,44 @@ App.submitJoin = async function(){
   btn.disabled = true; btn.textContent='جاري التفعيل...';
   REGISTERING = true;
   let cred = null;
+  // false = البريد ليه حساب دخول قديم في Firebase Auth (مثلًا اتحذف من الكنيسة وبيتدعى تاني):
+  // في الحالة دي مانحذفش الحساب أبدًا لو حصل أي فشل، بس نسجّل خروج.
+  let isNewAccount = true;
+  const undoSession = async ()=>{
+    if(!cred) return;
+    try{ if(isNewAccount) await deleteUser(cred.user); else await signOut(auth); }catch(_){}
+    cred = null;
+  };
   try{
-    cred = await createUserWithEmailAndPassword(auth, email, pass);
+    try{
+      cred = await createUserWithEmailAndPassword(auth, email, pass);
+    }catch(e){
+      if(!(e && e.code === 'auth/email-already-in-use')) throw e;
+      // البريد ليه حساب قديم: نتأكد إنه صاحبه بكلمة المرور، وبعدين نكمل بنفس الحساب بدل ما نرفض
+      isNewAccount = false;
+      try{
+        cred = await signInWithEmailAndPassword(auth, email, pass);
+      }catch(e2){
+        const c = (e2 && e2.code) || '';
+        if(c==='auth/wrong-password' || c==='auth/invalid-credential' || c==='auth/invalid-login-credentials'){
+          err.textContent = 'البريد ده مسجّل قبل كده في النظام. اكتب كلمة المرور القديمة بتاعتك، أو لو نسيتها ارجع لشاشة الدخول واضغط "نسيت كلمة المرور؟" وبعدين ارجع هنا.';
+          err.style.display='block';
+          return;
+        }
+        throw e2;
+      }
+      // لو الحساب ده مفعّل فعلًا في النظام (له مستند دور) مايتلمسش — يسجّل دخول عادي
+      const existing = await getDoc(doc(dbFire,'users', cred.user.uid));
+      if(existing.exists()){
+        await undoSession();
+        err.textContent = 'الحساب ده مفعّل بالفعل في النظام — سجّل دخول عادي من الشاشة الرئيسية.';
+        err.style.display='block';
+        return;
+      }
+    }
     const inviteSnap = await getDoc(doc(dbFire,'invites', email));
     if(!inviteSnap.exists() || inviteSnap.data().used){
-      await deleteUser(cred.user);
+      await undoSession();
       err.textContent = 'مفيش دعوة صالحة على البريد ده. تأكد من البريد أو اطلب من مسؤول كنيستك يبعتلك دعوة جديدة.';
       err.style.display='block';
       return;
@@ -652,10 +695,12 @@ App.submitJoin = async function(){
     await updateDoc(doc(dbFire,'invites', email), {used:true});
     await signOut(auth);
     document.getElementById('join-screen').style.display='none';
-    document.getElementById('pending-message').textContent = 'تم تفعيل حسابك بنجاح! سجّل الدخول دلوقتي بنفس البريد وكلمة المرور اللي اخترتها.';
+    document.getElementById('pending-message').textContent = isNewAccount
+      ? 'تم تفعيل حسابك بنجاح! سجّل الدخول دلوقتي بنفس البريد وكلمة المرور اللي اخترتها.'
+      : 'تم تفعيل حسابك من جديد بنجاح! سجّل الدخول دلوقتي بنفس البريد وكلمة المرور.';
     document.getElementById('pending-screen').style.display='flex';
   }catch(e){
-    if(cred){ try{ await deleteUser(cred.user); }catch(_){} }
+    await undoSession();
     err.textContent = mapAuthError(e);
     err.style.display='block';
   }finally{
@@ -663,7 +708,6 @@ App.submitJoin = async function(){
     REGISTERING = false;
   }
 };
-
 
 App.showLogin = function(){
   document.getElementById('register-screen').style.display='none';
@@ -775,43 +819,15 @@ onAuthStateChanged(auth, async (fbUser) => {
     console.log('[AUTH] step 1 done. roleDoc.exists =', roleDoc.exists());
 
     if(!roleDoc.exists()){
-      console.log('[AUTH] step 2: no role doc yet, checking if system is empty (bootstrap check)');
-      const churchesSnap = await getDocs(collection(dbFire,'churches'));
-      const usersSnap = await getDocs(collection(dbFire,'users'));
-      console.log('[AUTH] step 2 done. churchesEmpty =', churchesSnap.empty, 'usersEmpty =', usersSnap.empty);
-      if(churchesSnap.empty && usersSnap.empty){
-        console.log('[AUTH] step 2b: system empty -> promoting this account to superadmin');
-        await setDoc(doc(dbFire,'users', fbUser.uid), {name: fbUser.email.split('@')[0], email: fbUser.email, role: 'superadmin'});
-        roleDoc = await getDoc(doc(dbFire,'users', fbUser.uid));
-        console.log('[AUTH] step 2b done. roleDoc.exists =', roleDoc.exists());
-      } else {
-        console.log('[AUTH] step 2c: system not empty, no role for this account -> pending screen');
-        showPendingScreen('تم تسجيل دخولك، لكن لا يوجد لك دور مُفعّل في النظام. تواصل مع الإدارة.');
-        await signOut(auth);
-        return;
-      }
+      // حساب الدخول (Firebase Auth) موجود لكن مفيش له مستند في النظام: اتحذف من مدير الكنيسة أو مش مربوط بأي كنيسة.
+      // (حذف مستخدم من التطبيق بيمسح مستنده بس، وحساب الدخول نفسه بيفضل موجود في Firebase Auth)
+      console.log('[AUTH] step 2: no role doc for this account -> access removed notice');
+      await signOutWithNotice('تم حذف حسابك من النظام أو مش مربوط بأي كنيسة. تواصل مع مسؤول كنيستك.');
+      return;
     }
 
     let userData = roleDoc.data();
     console.log('[AUTH] step 3: userData =', JSON.stringify(userData));
-
-    // ترقية تلقائية لمرة واحدة: حساب "مدير" قديم من قبل تفعيل تعدد الكنايس ومعندوش كنيسة مرتبطة
-    if(userData.role === 'admin' && !userData.churchId){
-      console.log('[AUTH] step 4: legacy admin without churchId -> checking migration');
-      const churchesSnap = await getDocs(collection(dbFire,'churches'));
-      if(churchesSnap.empty){
-        console.log('[AUTH] step 4b: migrating legacy admin to superadmin + demo church');
-        const demoChurchId = await fsAddRaw('churches', {
-          name: (userData.name||'بيانات')+' - كنيسة تجريبية', contactPhone:'', contactEmail:userData.email,
-          status:'active', activeUntil: '2099-12-31', createdAt: Date.now(),
-        });
-        await tagLegacyDataWithChurch(demoChurchId);
-        await setDoc(doc(dbFire,'users', fbUser.uid), {name:userData.name, email:userData.email, role:'superadmin'});
-        roleDoc = await getDoc(doc(dbFire,'users', fbUser.uid));
-        userData = roleDoc.data();
-        console.log('[AUTH] step 4b done. new userData =', JSON.stringify(userData));
-      }
-    }
 
     CURRENT_USER = {uid: fbUser.uid, email: fbUser.email, ...userData};
     console.log('[AUTH] step 5: CURRENT_USER set. role =', CURRENT_USER.role);

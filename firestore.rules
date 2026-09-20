@@ -102,7 +102,10 @@ service cloud.firestore {
     match /auditLog/{docId} {
       allow read: if isSignedIn() && (isSuperAdmin() || belongsToChurch(resource.data.churchId));
       allow create: if isSignedIn() && (isSuperAdmin() || request.resource.data.churchId == myChurch());
-      allow update, delete: if false;
+      allow update: if false;
+      // الحذف للمالك فقط: لازم عشان "حذف الكنيسة نهائيًا" بيمسح سجل عملياتها كمان.
+      // الكنايس نفسها (بما فيهم مديرها) مايقدروش يحذفوا أو يعدّلوا سجلهم أبدًا.
+      allow delete: if isSuperAdmin();
     }
 
     // ===== بيانات كل كنيسة (كل سجل معلّم برقم كنيسته) =====
