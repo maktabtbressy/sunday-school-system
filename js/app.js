@@ -1218,10 +1218,21 @@ async function saLog(action, details){
   try{ await addDoc(collection(dbFire,'superadminLog'), {action, details: details||'', date: Date.now(), user: CURRENT_USER?CURRENT_USER.name:''}); }
   catch(e){ console.error(e); }
 }
+/* نسخة رقمية (ms) من "لحد إمتى الكنيسة تقدر تكتب على بياناتها" — قواعد Firestore بتقارنها بوقت السيرفر
+   (تواريخ الاشتراك عندنا نصوص ISO ومش قابلة للمقارنة هناك). لازم تتكتب مع كل تغيير في status/trialEndsAt/activeUntil.
+   exempt = مفتوح دائمًا · trial/active = لحد تاريخ الانتهاء · أي حالة تانية = مقفول (0). */
+const ACCESS_NEVER_ENDS_MS = 9999999999999;
+function accessUntilMsFor(c){
+  if(c.status === 'exempt') return ACCESS_NEVER_ENDS_MS;
+  const iso = c.status === 'trial' ? c.trialEndsAt : (c.status === 'active' ? c.activeUntil : null);
+  if(!iso) return 0;
+  const t = new Date(iso).getTime();
+  return isNaN(t) ? 0 : t;
+}
 SuperAdmin.approve = async function(id){
   const trialEndsAt = new Date(Date.now() + TRIAL_DAYS*86400000).toISOString();
   try{
-    await updateDoc(doc(dbFire,'churches',id), {status:'trial', trialEndsAt});
+    await updateDoc(doc(dbFire,'churches',id), {status:'trial', trialEndsAt, accessUntilMs: accessUntilMsFor({status:'trial', trialEndsAt})});
     await saLog('قبول طلب كنيسة', byId(SA_CHURCHES,id)?.name||id);
     UI.closeModal(); toast('تم قبول الكنيسة وبدء فترة تجربة '+TRIAL_DAYS+' يوم');
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
@@ -1229,7 +1240,7 @@ SuperAdmin.approve = async function(id){
 SuperAdmin.reject = async function(id){
   if(!confirm('تأكيد رفض طلب هذه الكنيسة؟')) return;
   try{
-    await updateDoc(doc(dbFire,'churches',id), {status:'rejected'});
+    await updateDoc(doc(dbFire,'churches',id), {status:'rejected', accessUntilMs: 0});
     await saLog('رفض طلب كنيسة', byId(SA_CHURCHES,id)?.name||id);
     UI.closeModal(); toast('تم رفض الطلب');
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
@@ -1240,15 +1251,42 @@ SuperAdmin.extend = async function(id){
   const base = (c.status==='active' && c.activeUntil && new Date(c.activeUntil).getTime()>Date.now()) ? new Date(c.activeUntil).getTime() : Date.now();
   const activeUntil = new Date(base + days*86400000).toISOString();
   try{
-    await updateDoc(doc(dbFire,'churches',id), {status:'active', activeUntil});
+    await updateDoc(doc(dbFire,'churches',id), {status:'active', activeUntil, accessUntilMs: accessUntilMsFor({status:'active', activeUntil})});
     await saLog('تمديد/تفعيل اشتراك', `${c?.name||id} — ${days} يوم`);
     UI.closeModal(); toast('تم تفعيل/تمديد الاشتراك '+days+' يوم');
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
 };
+/* مزامنة النسخة الرقمية لكل الكنايس (الكنايس القديمة ماكانتش ليها). الكنيسة pending بتتساب من غير نسخة (لازم تفضل تقدر تتبذّر وقت التسجيل). */
+SuperAdmin.syncAccessMirrors = async function(){
+  let n = 0;
+  for(const c of SA_CHURCHES){
+    if(c.status === 'pending') continue;
+    const want = accessUntilMsFor(c);
+    if(c.accessUntilMs !== want){ await updateDoc(doc(dbFire,'churches',c.id), {accessUntilMs: want}); n++; }
+  }
+  return n;
+};
+/* فرض قفل الاشتراك على السيرفر (المالك فقط): لما يتفعّل، أي كنيسة اشتراكها منتهي ماتقدرش تضيف/تعدّل/تحذف بياناتها
+   حتى لو تحايلت على الواجهة. الافتراضي متوقف (السلوك زي ما هو). العلَم في platformConfig/public.serverLockEnforced */
+SuperAdmin.setServerLock = async function(on){
+  if(!CURRENT_USER || CURRENT_USER.role !== 'superadmin'){ toast('الصلاحية دي للمالك فقط'); return; }
+  if(on && !confirm('هتفعّل قفل الاشتراك على السيرفر: أي كنيسة اشتراكها منتهي مش هتقدر تضيف أو تعدّل أو تحذف بياناتها. هيتم الأول مزامنة تواريخ كل الكنايس. متابعة؟')) return;
+  try{
+    let synced = 0;
+    if(on) synced = await SuperAdmin.syncAccessMirrors();
+    await setDoc(doc(dbFire,'platformConfig','public'), {serverLockEnforced: !!on}, {merge:true});
+    await saLog(on ? 'تفعيل قفل الاشتراك على السيرفر' : 'إيقاف قفل الاشتراك على السيرفر', on ? `تمت مزامنة ${synced} كنيسة` : '');
+    toast(on ? `تم تفعيل القفل على السيرفر (اتزامنت ${synced} كنيسة)` : 'تم إيقاف القفل على السيرفر');
+  }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
+};
+SuperAdmin.syncNow = async function(){
+  try{ const n = await SuperAdmin.syncAccessMirrors(); toast(n ? `اتزامنت ${n} كنيسة` : 'كل الكنايس متزامنة بالفعل'); }
+  catch(e){ console.error(e); toast('تعذرت المزامنة: '+e.message); }
+};
 SuperAdmin.exempt = async function(id){
   if(!confirm('هتخلي الكنيسة دي مفتوحة دائمًا بدون اشتراك أو حد زمني. متابعة؟')) return;
   try{
-    await updateDoc(doc(dbFire,'churches',id), {status:'exempt'});
+    await updateDoc(doc(dbFire,'churches',id), {status:'exempt', accessUntilMs: ACCESS_NEVER_ENDS_MS});
     await saLog('إعفاء دائم', byId(SA_CHURCHES,id)?.name||id);
     UI.closeModal(); toast('تم إعفاء الكنيسة — بقت مفتوحة دائمًا');
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
@@ -1256,7 +1294,8 @@ SuperAdmin.exempt = async function(id){
 SuperAdmin.deactivate = async function(id){
   if(!confirm('هل تريد إلغاء تفعيل اشتراك هذه الكنيسة فورًا؟ لن تقدر تدخل النظام إلا بعد ما تفعّل الاشتراك تاني.')) return;
   try{
-    await updateDoc(doc(dbFire,'churches',id), {status:'active', activeUntil: new Date(Date.now()-1000).toISOString()});
+    const pastIso = new Date(Date.now()-1000).toISOString();
+    await updateDoc(doc(dbFire,'churches',id), {status:'active', activeUntil: pastIso, accessUntilMs: accessUntilMsFor({status:'active', activeUntil: pastIso})});
     await saLog('إلغاء تفعيل فوري', byId(SA_CHURCHES,id)?.name||id);
     UI.closeModal(); toast('تم إلغاء تفعيل اشتراك الكنيسة');
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
@@ -1264,7 +1303,7 @@ SuperAdmin.deactivate = async function(id){
 SuperAdmin.unexempt = async function(id){
   if(!confirm('هترجع الكنيسة دي لنظام الاشتراك العادي (هتتقفل لو مفيش اشتراك ساري). متابعة؟')) return;
   try{
-    await updateDoc(doc(dbFire,'churches',id), {status:'expired', activeUntil:null});
+    await updateDoc(doc(dbFire,'churches',id), {status:'expired', activeUntil:null, accessUntilMs: 0});
     await saLog('إلغاء إعفاء', byId(SA_CHURCHES,id)?.name||id);
     UI.closeModal(); toast('تم إلغاء الإعفاء — الكنيسة محتاجة تفعيل اشتراك دلوقتي');
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
@@ -1552,7 +1591,7 @@ SuperAdmin.approveProof = async function(proofId, churchId){
     }
     const base = (c.status==='active' && c.activeUntil && new Date(c.activeUntil).getTime()>Date.now()) ? new Date(c.activeUntil).getTime() : Date.now();
     const activeUntil = new Date(base + days*86400000).toISOString();
-    await updateDoc(doc(dbFire,'churches',churchId), {status:'active', activeUntil});
+    await updateDoc(doc(dbFire,'churches',churchId), {status:'active', activeUntil, accessUntilMs: accessUntilMsFor({status:'active', activeUntil})});
     await updateDoc(doc(dbFire,'paymentProofs',proofId), {status:'approved', reviewedAt: Date.now()});
     await saLog('قبول دفع وتفعيل اشتراك', `${c.name||churchId} — ${days} يوم${appliedCode?` (منهم ${appliedCode.bonusDays} من كود ${appliedCode.code})`:''}`);
     toast(appliedCode ? `تم القبول وتفعيل الاشتراك ${days} يوم (منهم ${appliedCode.bonusDays} من كود الخصم)` : 'تم القبول وتفعيل الاشتراك '+days+' يوم');
@@ -2121,7 +2160,21 @@ SuperAdmin.resetReportFilters = function(){ SA_REPORT_FILTERS = {from:'', to:'',
 
 /* ---- الخطط والعروض: خطط اشتراك معلنة + أكواد خصم/أيام إضافية ---- */
 SuperAdmin.renderPlans = function(el){
+  const lockOn = !!SA_PUBLIC_CONFIG.serverLockEnforced;
+  const unsynced = SA_CHURCHES.filter(c=> c.status !== 'pending' && c.accessUntilMs !== accessUntilMsFor(c)).length;
+  const expiredNow = SA_CHURCHES.filter(c=> c.status !== 'pending' && accessUntilMsFor(c) < Date.now()).length;
+  const lockCard = (CURRENT_USER && CURRENT_USER.role === 'superadmin') ? `
+    <div class="card card-pad" style="margin-bottom:16px;">
+      <b style="font-size:13px; display:block; margin-bottom:6px;">🔒 فرض قفل الاشتراك على السيرفر ${lockOn ? '<span class="pill pill-present">شغّال</span>' : '<span class="pill status-pending">متوقف</span>'}</b>
+      <p class="muted" style="margin:0 0 10px;">القفل العادي بيشتغل من الواجهة. لما تفعّل ده، الكنيسة اللي اشتراكها منتهي مش هتقدر تضيف أو تعدّل أو تحذف بياناتها حتى لو تحايلت على الواجهة (الدفع والدردشة والتذاكر تفضل شغالة). التفعيل بيزامن تواريخ كل الكنايس الأول.</p>
+      <p style="margin:0 0 12px;">كنايس اشتراكها منتهي حاليًا: <b>${expiredNow}</b> · كنايس محتاجة مزامنة: <b>${unsynced}</b></p>
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        ${lockOn ? `<button class="btn btn-danger btn-sm" onclick="SuperAdmin.setServerLock(false)">إيقاف الفرض</button>` : `<button class="btn btn-primary btn-sm" onclick="SuperAdmin.setServerLock(true)">تفعيل الفرض</button>`}
+        <button class="btn btn-ghost btn-sm" onclick="SuperAdmin.syncNow()">🔄 مزامنة التواريخ الآن</button>
+      </div>
+    </div>` : '';
   el.innerHTML = `
+    ${lockCard}
     <div class="card card-pad" style="margin-bottom:16px;">
       <b style="font-size:13px; display:block; margin-bottom:8px;">💳 إضافة خطة اشتراك جديدة (تظهر للكنايس كمعلومة توضيحية)</b>
       <div class="form-grid">

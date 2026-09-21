@@ -14,6 +14,25 @@ service cloud.firestore {
     function isChurchAdmin() { return isSignedIn() && myRole() == 'admin'; }
     function belongsToChurch(chId) { return isSignedIn() && myChurch() == chId; }
 
+    // ===== قفل الاشتراك على السيرفر (Phase 2) =====
+    // متوقف افتراضيًا: بيشتغل بس لما المالك يفعّله من لوحته (platformConfig/public.serverLockEnforced = true).
+    // ولو مفيش المستند ده أو العلَم مش موجود = مفيش أي فرض (السلوك زي ما هو).
+    function platformLockOn() {
+      return exists(/databases/$(database)/documents/platformConfig/public)
+        && get(/databases/$(database)/documents/platformConfig/public).data.get('serverLockEnforced', false) == true;
+    }
+    // الكنيسة "خارج الاشتراك" لما يكون عندها accessUntilMs (نسخة رقمية من تاريخ انتهاء الاشتراك بيكتبها التطبيق مع كل تغيير)
+    // وعدّى عليه وقت السيرفر. كنيسة من غير accessUntilMs (قديمة/pending) = مفتوحة.
+    function churchLockedOut(chId) {
+      return platformLockOn()
+        && exists(/databases/$(database)/documents/churches/$(chId))
+        && get(/databases/$(database)/documents/churches/$(chId)).data.get('accessUntilMs', 9999999999999) < request.time.toMillis();
+    }
+    // بيانات الكنيسة: القراءة دايمًا متاحة لأعضائها، أما الإنشاء/التعديل/الحذف فمقفولين لو الاشتراك منتهي (المالك مستثنى)
+    function canReadChurchDoc() { return isSignedIn() && (isSuperAdmin() || belongsToChurch(resource.data.churchId)); }
+    function canWriteChurchDoc() { return isSignedIn() && (isSuperAdmin() || (belongsToChurch(resource.data.churchId) && !churchLockedOut(resource.data.churchId))); }
+    function canCreateChurchDoc() { return isSignedIn() && (isSuperAdmin() || (request.resource.data.churchId == myChurch() && !churchLockedOut(request.resource.data.churchId))); }
+
     // ===== أدوات مساعدة للتحصين (Phase 1) =====
     // الأدوار المسموح لمدير الكنيسة يمنحها داخل كنيسته فقط — أبدًا مش superadmin ولا subadmin
     function churchRoles() { return ['admin', 'servant', 'staff']; }
@@ -63,7 +82,7 @@ service cloud.firestore {
       // أو أدمن فرعي بصلاحية payments لتفعيل اشتراك بعد قبول دفعة (status/activeUntil بس)
       allow update: if isSuperAdmin() || subAdminCan('churches') || (
         subAdminCan('payments')
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'activeUntil'])
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'activeUntil', 'accessUntilMs'])
         && request.resource.data.status == 'active'
       );
       allow delete: if isSuperAdmin();
@@ -109,41 +128,51 @@ service cloud.firestore {
     }
 
     // ===== بيانات كل كنيسة (كل سجل معلّم برقم كنيسته) =====
+    // (الإنشاء/التعديل/الحذف بيتأثروا بقفل الاشتراك على السيرفر لو المالك فعّله — انظر canWriteChurchDoc)
     match /members/{docId} {
-      allow read, update, delete: if isSignedIn() && (isSuperAdmin() || belongsToChurch(resource.data.churchId));
-      allow create: if isSignedIn() && (isSuperAdmin() || request.resource.data.churchId == myChurch());
+      allow read: if canReadChurchDoc();
+      allow update, delete: if canWriteChurchDoc();
+      allow create: if canCreateChurchDoc();
     }
     match /servants/{docId} {
-      allow read, update, delete: if isSignedIn() && (isSuperAdmin() || belongsToChurch(resource.data.churchId));
-      allow create: if isSignedIn() && (isSuperAdmin() || request.resource.data.churchId == myChurch());
+      allow read: if canReadChurchDoc();
+      allow update, delete: if canWriteChurchDoc();
+      allow create: if canCreateChurchDoc();
     }
     match /stages/{docId} {
-      allow read, update, delete: if isSignedIn() && (isSuperAdmin() || belongsToChurch(resource.data.churchId));
-      allow create: if isSignedIn() && (isSuperAdmin() || request.resource.data.churchId == myChurch());
+      allow read: if canReadChurchDoc();
+      allow update, delete: if canWriteChurchDoc();
+      allow create: if canCreateChurchDoc();
     }
     match /grades/{docId} {
-      allow read, update, delete: if isSignedIn() && (isSuperAdmin() || belongsToChurch(resource.data.churchId));
-      allow create: if isSignedIn() && (isSuperAdmin() || request.resource.data.churchId == myChurch());
+      allow read: if canReadChurchDoc();
+      allow update, delete: if canWriteChurchDoc();
+      allow create: if canCreateChurchDoc();
     }
     match /classes/{docId} {
-      allow read, update, delete: if isSignedIn() && (isSuperAdmin() || belongsToChurch(resource.data.churchId));
-      allow create: if isSignedIn() && (isSuperAdmin() || request.resource.data.churchId == myChurch());
+      allow read: if canReadChurchDoc();
+      allow update, delete: if canWriteChurchDoc();
+      allow create: if canCreateChurchDoc();
     }
     match /attendance/{docId} {
-      allow read, update, delete: if isSignedIn() && (isSuperAdmin() || belongsToChurch(resource.data.churchId));
-      allow create: if isSignedIn() && (isSuperAdmin() || request.resource.data.churchId == myChurch());
+      allow read: if canReadChurchDoc();
+      allow update, delete: if canWriteChurchDoc();
+      allow create: if canCreateChurchDoc();
     }
     match /evaluations/{docId} {
-      allow read, update, delete: if isSignedIn() && (isSuperAdmin() || belongsToChurch(resource.data.churchId));
-      allow create: if isSignedIn() && (isSuperAdmin() || request.resource.data.churchId == myChurch());
+      allow read: if canReadChurchDoc();
+      allow update, delete: if canWriteChurchDoc();
+      allow create: if canCreateChurchDoc();
     }
     match /followups/{docId} {
-      allow read, update, delete: if isSignedIn() && (isSuperAdmin() || belongsToChurch(resource.data.churchId));
-      allow create: if isSignedIn() && (isSuperAdmin() || request.resource.data.churchId == myChurch());
+      allow read: if canReadChurchDoc();
+      allow update, delete: if canWriteChurchDoc();
+      allow create: if canCreateChurchDoc();
     }
     match /activities/{docId} {
-      allow read, update, delete: if isSignedIn() && (isSuperAdmin() || belongsToChurch(resource.data.churchId));
-      allow create: if isSignedIn() && (isSuperAdmin() || request.resource.data.churchId == myChurch());
+      allow read: if canReadChurchDoc();
+      allow update, delete: if canWriteChurchDoc();
+      allow create: if canCreateChurchDoc();
     }
 
     // ===== دعوات المستخدمين (بالبريد) =====
