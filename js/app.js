@@ -483,8 +483,23 @@ function attachListeners(onReady){
   unsubscribers.push(unsubChatSession);
 }
 
+/* كل تحديث لحظي من Firestore بيعيد رسم الصفحة الحالية من الصفر. ده كان بيمسح شغل المستخدم اللي لسه ماتحفظش لو خادم تاني حفظ أي حاجة
+   في نفس الوقت (بالذات صباح الأحد وكذا خادم بيسجّلوا حضور فصول مختلفة). فبنسيب الصفحة زي ما هي في الحالات دي: */
+function shouldHoldLiveRender(){
+  const content = document.getElementById('content');
+  if(!content) return false;
+  // صفحة الحضور بعد اختيار فصل: العلامات اللي ماتحفظتش والقائمة الظاهرة تفضل زي ما هي (بتتحدّث عند اختيار فصل/تاريخ تاني)
+  if(CURRENT_PAGE === 'attendance'){ const c = document.getElementById('att-class'); if(c && c.value) return true; }
+  // تقرير معروض (سنوي أو غيره): مايختفيش لما بيانات تتغير أثناء القراءة/الطباعة
+  if(CURRENT_PAGE === 'reports'){ const o = document.getElementById('report-output'); if(o && o.innerHTML.trim()) return true; }
+  // المستخدم بيكتب في خانة نص متعددة الأسطر (زي قوالب واتساب في الإعدادات)
+  const a = document.activeElement;
+  if(a && a.tagName === 'TEXTAREA' && content.contains(a)) return true;
+  return false;
+}
 function renderCurrent(){
   if(document.getElementById('app').style.display==='none') return;
+  if(shouldHoldLiveRender()) return;
   App.navigate(CURRENT_PAGE, CURRENT_PARAM);
 }
 
@@ -2595,6 +2610,42 @@ const Views = {};
 const $content = () => document.getElementById('content');
 
 /* ---------- Dashboard ---------- */
+/* ---------- قائمة "ابدأ من هنا" للكنيسة الجديدة ----------
+   الخطوات بتتحسب من البيانات الفعلية (مفيش حاجة جديدة بتتخزن)، والكارت بيختفي لوحده لما الأربع خطوات الأساسية يخلصوا،
+   أو لما المدير يضغط "إخفاء" (بيتحفظ على المتصفح لكل كنيسة). ظاهر لمدير الكنيسة فقط. */
+const ONBOARDING_STEPS = [
+  {id:'stages',     ic:'🏫', title:'أضف المراحل والفصول',   desc:'ابدأ بالمراحل (ابتدائي، إعدادي...) وبعدها الفصول جواها.', page:'stages',     done:()=>DB.classes.length>0},
+  {id:'members',    ic:'🧒', title:'أضف المخدومين',         desc:'واحد واحد، أو استورد ملف CSV مرة واحدة.',                 page:'members',    done:()=>DB.members.length>0},
+  {id:'servants',   ic:'🧑‍🏫', title:'أضف الخدام',             desc:'اكتب بيانات الخدام عشان تبقى متاحة في المتابعة والتقارير.', page:'servants',   done:()=>DB.servants.length>0},
+  {id:'attendance', ic:'📝', title:'سجّل أول حضور',         desc:'اختار الفصل وعلّم حاضر/غائب، أو استخدم باركود المخدوم.',   page:'attendance', done:()=>DB.attendance.length>0},
+];
+const Onboarding = {};
+Onboarding.key = ()=> 'onb-dismissed-' + CURRENT_CHURCH_ID;
+Onboarding.isDismissed = function(){ try{ return localStorage.getItem(Onboarding.key()) === '1'; }catch(_){ return false; } };
+Onboarding.dismiss = function(){ try{ localStorage.setItem(Onboarding.key(), '1'); }catch(_){} App.navigate('dashboard'); };
+Onboarding.card = function(){
+  if(!CURRENT_USER || !(CURRENT_USER.role === 'admin' || IMPERSONATING)) return '';
+  const steps = ONBOARDING_STEPS.map(s=>({...s, isDone: !!s.done()}));
+  const doneCount = steps.filter(s=>s.isDone).length;
+  if(doneCount === steps.length || Onboarding.isDismissed()) return '';
+  const next = steps.find(s=>!s.isDone);
+  const pct = Math.round(doneCount / steps.length * 100);
+  return `<div class="card card-pad no-print" id="onboarding-card" style="margin-bottom:18px; border-color:var(--gold);">
+    <div class="section-head" style="margin-bottom:8px;">
+      <h2>🚀 ابدأ من هنا <span class="muted" style="font-size:13px; font-weight:400;">— ${doneCount} من ${steps.length} خطوات</span></h2>
+      <button class="btn btn-ghost btn-sm" onclick="Onboarding.dismiss()">إخفاء</button>
+    </div>
+    <div style="height:8px; background:var(--line); border-radius:99px; overflow:hidden; margin-bottom:14px;"><div style="height:100%; width:${pct}%; background:var(--navy);"></div></div>
+    <div style="display:flex; flex-direction:column; gap:8px;">
+      ${steps.map(s=>`<div style="display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:10px; ${s.id===next.id ? 'background:var(--gold-soft);' : ''}">
+        <span style="font-size:18px;">${s.isDone ? '✅' : s.ic}</span>
+        <div style="flex:1;"><div style="font-weight:600; ${s.isDone ? 'text-decoration:line-through; color:var(--ink-soft);' : ''}">${s.title}</div>${s.isDone ? '' : `<div class="muted" style="font-size:12.5px;">${s.desc}</div>`}</div>
+        ${s.isDone ? '' : `<button class="btn ${s.id===next.id ? 'btn-primary' : 'btn-ghost'} btn-sm" onclick="App.navigate('${s.page}')">${s.id===next.id ? 'ابدأ ←' : 'افتح'}</button>`}
+      </div>`).join('')}
+    </div>
+    <p class="muted" style="margin:12px 0 0; font-size:12.5px;">💡 بعد كده: ادعُ خدامك من "المستخدمون والصلاحيات"، وعدّل رسايل واتساب الجاهزة من "الإعدادات".</p>
+  </div>`;
+};
 Views.dashboard = function(){
   const D = DB;
   const today = todayISO();
@@ -2613,6 +2664,7 @@ Views.dashboard = function(){
     return c>d;
   }).length;
   const needFollowup = computeNeedFollowup();
+  const openTasks = D.followups.filter(fupIsOpen).sort(fupPriorityCompare);
   const upcomingBirthdays = (()=>{
     const now = new Date(); now.setHours(0,0,0,0);
     return activeMembers.filter(m=>m.birthDate).map(m=>{
@@ -2628,6 +2680,7 @@ Views.dashboard = function(){
   const monthPresentPct = monthAtt.length ? Math.round(monthAtt.filter(a=>a.present).length/monthAtt.length*100) : 0;
 
   $content().innerHTML = `
+    ${Onboarding.card()}
     <div class="stat-grid">
       ${statCard('إجمالي المخدومين', activeMembers.length,'', "App.navigate('members')")}
       ${statCard('إجمالي الخدام', D.servants.filter(s=>s.status!=='inactive').length,'', "App.navigate('servants')")}
@@ -2666,6 +2719,13 @@ Views.dashboard = function(){
           <td><span class="pill pill-absent">${m.reason}</span></td>
           <td>${(m.phone||m.guardianPhone)? `<button class="btn btn-ghost btn-sm" title="رسالة افتقاد واتساب" onclick="WA.openModal('${m.id}','absence')">💬</button>` : ''}</td></tr>`).join('')}</tbody></table>`
           : `<p class="muted">لا يوجد حاليًا مخدومون بحاجة لمتابعة عاجلة 🎉</p>`}
+      </div>
+      <div class="card card-pad">
+        <div class="section-head"><h2>🗂️ متابعات مطلوبة (${openTasks.length})</h2>${openTasks.length>6 ? `<a style="cursor:pointer; font-size:12.5px;" onclick="Followups._filter='open'; App.navigate('followups')">عرض الكل</a>` : ''}</div>
+        ${openTasks.length ? `<table><tbody>${openTasks.slice(0,6).map(f=>{ const m = byId(D.members, f.memberId); return `
+          <tr><td class="name-cell"><span class="nm" onclick="App.navigate('memberProfile','${f.memberId}')">${esc(m?m.name:'—')}</span><div class="muted" style="font-size:12px;">${esc(f.type||'')}${f.subject ? ' — '+esc(f.subject) : ''}</div></td>
+          <td>${fupStatusPill(f)}</td>
+          <td><div class="row-actions"><button class="btn btn-primary btn-sm" title="تمت" onclick="Followups.markDone('${f.id}')">✔</button>${m && (m.phone||m.guardianPhone) ? `<button class="btn btn-ghost btn-sm" title="رسالة واتساب" onclick="WA.openModal('${f.memberId}','${f.type==='غياب'?'absence':'custom'}')">💬</button>` : ''}</div></td></tr>`; }).join('')}</tbody></table>` : `<p class="muted">مفيش متابعات مفتوحة 🎉</p>`}
       </div>
       <div class="card card-pad">
         <div class="section-head"><h2>آخر العمليات</h2></div>
@@ -3184,9 +3244,9 @@ Members.renderTab = function(m, records, evals, fups, acts){
       </div>`).join('') : `<p class="muted">لا توجد تقييمات بعد.</p>`);
   } else if(CURRENT_MEMBER_TAB==='followups'){
     el.innerHTML = `<button class="btn btn-gold btn-sm no-print" style="margin-bottom:12px;" onclick="Followups.openForm(null,'${m.id}')">+ متابعة جديدة</button>` +
-      (fups.length ? `<table><thead><tr><th>التاريخ</th><th>الخادم</th><th>النوع</th><th>الموضوع</th><th>الإجراء</th><th></th></tr></thead><tbody>
-      ${fups.map(f=>`<tr><td>${fmtDate(f.date)}</td><td>${esc(nameOf(DB.servants,f.servantId))}</td><td>${esc(f.type)}</td><td>${esc(f.subject)}</td><td>${esc(f.action)}</td>
-      <td><button class="btn btn-ghost btn-sm" onclick="Followups.openForm('${f.id}','${m.id}')">تعديل</button></td></tr>`).join('')}
+      (fups.length ? `<table><thead><tr><th>التاريخ</th><th>الحالة</th><th>الخادم</th><th>النوع</th><th>الموضوع</th><th>الإجراء</th><th></th></tr></thead><tbody>
+      ${fups.map(f=>`<tr><td>${fmtDate(f.date)}</td><td>${fupStatusPill(f)}</td><td>${esc(nameOf(DB.servants,f.servantId))}</td><td>${esc(f.type)}</td><td>${esc(f.subject)}</td><td>${esc(f.action)}</td>
+      <td>${fupIsOpen(f) ? `<button class="btn btn-primary btn-sm" onclick="Followups.markDone('${f.id}')">✔ تمت</button> ` : ''}<button class="btn btn-ghost btn-sm" onclick="Followups.openForm('${f.id}','${m.id}')">تعديل</button></td></tr>`).join('')}
       </tbody></table>` : `<p class="muted">لا توجد متابعات مسجلة.</p>`);
   } else if(CURRENT_MEMBER_TAB==='activities'){
     el.innerHTML = acts.length ? `<table><thead><tr><th>النشاط</th><th>التاريخ</th><th>المكان</th></tr></thead><tbody>
@@ -3521,7 +3581,8 @@ WA.recipients = function(m){
   if(m.guardianPhone && String(m.guardianPhone).replace(/\D/g,'')) out.push({label:'ولي الأمر'+(m.guardianName?' ('+m.guardianName+')':'')+' — '+m.guardianPhone, phone:m.guardianPhone});
   return out;
 };
-WA.openModal = function(memberId, key){
+WA.openModal = function(memberId, key, opts){
+  WA._after = (opts && opts.after) || null;   // دالة اختيارية بتتنادى بعد ما واتساب يتفتح فعلًا
   const m = byId(DB.members, memberId);
   if(!m){ toast('المخدوم مش موجود'); return; }
   WA._mid = memberId;
@@ -3559,7 +3620,9 @@ WA.send = function(){
   if(!win){ toast('برجاء السماح بفتح نوافذ منبثقة عشان يتفتح واتساب'); return; }
   const tpl = WA_TEMPLATES.find(t=>t.key===document.getElementById('wa-tpl').value);
   log('فتح رسالة واتساب', m.name+' — '+(tpl?tpl.label:''));
+  const after = WA._after; WA._after = null;
   UI.closeModal();
+  if(after) after(m.id);
 };
 WA.copy = async function(){
   const ta = document.getElementById('wa-text'); if(!ta) return;
@@ -3751,6 +3814,7 @@ Attendance.render = function(){
         <div class="toolbar no-print">
           <button class="btn btn-ghost btn-sm" onclick="Attendance.copyLast()">📋 نسخ حضور آخر مرة</button>
           <button class="btn btn-ghost btn-sm" onclick="Attendance.markAll(true)">تحديد الكل حاضر</button>
+          <button class="btn btn-ghost btn-sm" onclick="Attendance.showAbsentees(false)">📲 افتقاد الغائبين</button>
           <button class="btn btn-ghost btn-sm" onclick="Attendance.printRoster('${classId}','${date}')">🖨 طباعة كشف الفصل</button>
           <button class="btn btn-primary btn-sm" onclick="Attendance.saveAll()">حفظ الحضور</button>
         </div>
@@ -3767,7 +3831,9 @@ Attendance.render = function(){
         }).join('')}
       </tbody></table>
     </div>
+    <div id="att-absent-panel" class="no-print"></div>
   `;
+  Attendance._contacted = {};
 };
 Attendance.printRoster = function(classId, date){
   const members = DB.members.filter(m=>m.classId===classId && m.status!=='inactive').sort((a,b)=>a.name.localeCompare(b.name,'ar'));
@@ -3852,6 +3918,55 @@ Attendance.copyLast = function(){
   }
   toast(`تم نسخ حضور ${fmtDate(srcDate)} — راجع واضغط "حفظ الحضور"`);
 };
+/* افتقاد الغائبين: بيعرض اللي معلّم "غائب" على الشاشة مع عدد مرات الغياب المتتالية وزر رسالة واتساب جاهزة (قالب "افتقاد") لكل واحد */
+Attendance._contacted = {};
+Attendance._autoLog = true;
+Attendance.showAbsentees = function(silentIfNone){
+  const holder = document.getElementById('att-absent-panel');
+  const classSel = document.getElementById('att-class'), dateEl = document.getElementById('att-date');
+  if(!holder || !classSel || !dateEl) return;
+  const date = dateEl.value;
+  const absent = [];
+  document.querySelectorAll('#att-rows tr').forEach(tr=>{
+    const mid = tr.dataset.mid; const chk = tr.querySelector(`input[name="p-${mid}"]:checked`);
+    if(chk && chk.value === '0'){ const m = byId(DB.members, mid); if(m) absent.push(m); }
+  });
+  if(!absent.length){
+    holder.innerHTML = silentIfNone ? '' : `<div class="card card-pad" style="margin-top:14px;"><p class="muted" style="margin:0;">مفيش غايبين على الشاشة دلوقتي 🎉</p></div>`;
+    return;
+  }
+  // عدد مرات الغياب المتتالية = النهاردة + الجلسات السابقة المتتالية اللي كان غايب فيها
+  const streakOf = m => {
+    const prev = DB.attendance.filter(a=>a.memberId===m.id && a.date && a.date < date).sort((a,b)=> a.date < b.date ? 1 : -1);
+    let n = 1; for(const r of prev){ if(r.present) break; n++; } return n;
+  };
+  const rows = absent.map(m=>({m, streak: streakOf(m), hasPhone: WA.recipients(m).length > 0})).sort((a,b)=> b.streak - a.streak);
+  holder.innerHTML = `<div class="card card-pad" style="margin-top:14px;">
+    <div class="section-head"><h2 style="font-size:15px;">📲 افتقاد الغائبين (${rows.length})</h2><label class="muted" style="display:flex; gap:6px; align-items:center; cursor:pointer; font-size:12.5px;"><input type="checkbox" ${Attendance._autoLog!==false?'checked':''} onchange="Attendance._autoLog=this.checked"> سجّل متابعة تلقائيًا لما واتساب يتفتح</label></div>
+    <table><tbody>${rows.map(r=>`<tr>
+      <td>${esc(r.m.name)}</td>
+      <td>${r.streak >= 2 ? `<span class="pill pill-absent">غائب ${r.streak} مرات متتالية</span>` : `<span class="pill status-pending">أول غياب</span>`}</td>
+      <td>${r.hasPhone ? `<button class="btn btn-ghost btn-sm" data-mid="${r.m.id}" onclick="Attendance.contact('${r.m.id}')">${Attendance._contacted[date+'|'+r.m.id] ? '✓ اتفتحت رسالة' : '💬 افتقاد'}</button>` : `<span class="muted">مفيش رقم هاتف</span>`}
+        <button class="btn btn-ghost btn-sm" title="سجّل مهمة متابعة" onclick="Attendance.addTask('${r.m.id}')">📌 مهمة</button></td>
+    </tr>`).join('')}</tbody></table></div>`;
+};
+Attendance.contact = function(mid){
+  const date = (document.getElementById('att-date')||{}).value;
+  WA.openModal(mid, 'absence', { after: id=>{
+    Attendance._contacted[date+'|'+id] = true;
+    const btn = document.querySelector(`#att-absent-panel button[data-mid="${id}"]`);
+    if(btn) btn.textContent = '✓ اتفتحت رسالة';
+    if(Attendance._autoLog !== false){
+      Followups.logQuick({memberId:id, type:'غياب', subject:'غياب '+fmtDate(date), action:'فتح رسالة افتقاد على واتساب'}).catch(e=>console.error(e));
+    }
+  }});
+};
+/* مهمة متابعة للغايب (موعدها بعد 3 أيام) — بتفتح نموذج المتابعة معبّي، وبعد الحفظ المستخدم يفضل في صفحة الحضور */
+Attendance.addTask = function(mid){
+  const date = (document.getElementById('att-date')||{}).value || todayISO();
+  const due = new Date(Date.now() + 3*86400000).toISOString().slice(0,10);
+  Followups.openForm(null, mid, {status:'open', type:'غياب', subject:'غياب '+fmtDate(date), nextDate:due, stay:true});
+};
 Attendance.saveAll = async function(){
   const classId = document.getElementById('att-class').value;
   const date = document.getElementById('att-date').value;
@@ -3867,6 +3982,7 @@ Attendance.saveAll = async function(){
     await Promise.all(ops);
     await log('تسجيل حضور', fmtDate(date)+' — '+nameOf(DB.classes,classId));
     toast('تم حفظ الحضور بنجاح');
+    Attendance.showAbsentees(true);   // لو فيه غايبين اعرضهم مع زر الافتقاد
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
 };
 
@@ -3933,26 +4049,60 @@ Evaluations.remove = async function(id){
 };
 
 /* ---------- Follow-ups ---------- */
-const Followups = {};
+/* المتابعة كمهام: كل سجل متابعة ممكن يبقى "مفتوح" (status:'open' + موعد استحقاق في nextDate) أو "تم".
+   السجلات القديمة اللي مالهاش status بتتعامل كـ "تم" (سجل اتعمل خلاص) عشان مايظهرش كومة مهام متأخرة من الماضي. */
+function fupIsOpen(f){ return !!f && f.status === 'open'; }
+function fupDaysToDue(f){ return f && f.nextDate ? Math.round((Date.parse(f.nextDate) - Date.parse(todayISO())) / 86400000) : null; }
+function fupIsOverdue(f){ const d = fupDaysToDue(f); return fupIsOpen(f) && d !== null && d < 0; }
+function fupStatusPill(f){
+  if(!fupIsOpen(f)) return '<span class="pill pill-present">تمت</span>';
+  const d = fupDaysToDue(f), soft = 'background:var(--gold-soft);';
+  if(d === null) return `<span class="pill" style="${soft}">مفتوحة</span>`;
+  if(d < 0) return `<span class="pill pill-absent">متأخرة ${-d} يوم</span>`;
+  if(d === 0) return `<span class="pill" style="${soft}">النهاردة</span>`;
+  return `<span class="pill" style="${soft}">بعد ${d} يوم</span>`;
+}
+/* ترتيب المهام: المتأخرة (الأقدم موعدًا أولًا) ← اللي ليها موعد (الأقرب أولًا) ← اللي من غير موعد */
+function fupPriorityCompare(a, b){
+  const rank = f => { const d = fupDaysToDue(f); return d === null ? 2 : (d < 0 ? 0 : 1); };
+  return rank(a) - rank(b) || String(a.nextDate||'').localeCompare(String(b.nextDate||'')) || String(a.date||'').localeCompare(String(b.date||''));
+}
+const Followups = {_filter:'', _stay:false};
 Views.followups = function(){
+  const openCount = DB.followups.filter(fupIsOpen).length, overdueCount = DB.followups.filter(fupIsOverdue).length;
+  const sel = v => Followups._filter === v ? 'selected' : '';
   listPage({
     title:'المتابعة الفردية', addLabel:'متابعة جديدة', onAdd:'Followups.openForm()',
     searchFields:[],
-    rows:()=>DB.followups.map(f=>({...f, memberName:nameOf(DB.members,f.memberId), servantName:nameOf(DB.servants,f.servantId)})).sort((a,b)=>new Date(b.date)-new Date(a.date)),
+    filtersHtml:`<select id="fu-status" onchange="_lpRender()"><option value="">كل الحالات</option><option value="open" ${sel('open')}>مفتوحة (${openCount})</option><option value="overdue" ${sel('overdue')}>متأخرة (${overdueCount})</option><option value="done" ${sel('done')}>تمت</option></select>`,
+    extraButtonsHtml:`<button class="btn btn-primary btn-sm" onclick="Followups.openForm(null,null,{status:'open'})">+ مهمة متابعة</button>`,
+    rows:()=>{
+      const el = document.getElementById('fu-status');
+      Followups._filter = el ? el.value : Followups._filter;
+      let list = DB.followups.map(f=>({...f, memberName:nameOf(DB.members,f.memberId), servantName:nameOf(DB.servants,f.servantId)}));
+      if(Followups._filter === 'open') list = list.filter(fupIsOpen);
+      else if(Followups._filter === 'overdue') list = list.filter(fupIsOverdue);
+      else if(Followups._filter === 'done') list = list.filter(f=>!fupIsOpen(f));
+      const opens = list.filter(fupIsOpen).sort(fupPriorityCompare);
+      const dones = list.filter(f=>!fupIsOpen(f)).sort((a,b)=>new Date(b.date)-new Date(a.date));
+      return [...opens, ...dones];
+    },
     columns:[
-      {h:'المخدوم', key:'memberName'}, {h:'التاريخ', render:f=>fmtDate(f.date)}, {h:'الخادم', key:'servantName'},
-      {h:'النوع', key:'type'}, {h:'الموضوع', key:'subject'},
-      {h:'', render:f=>`<div class="row-actions"><button class="btn btn-ghost btn-sm" onclick="Followups.openForm('${f.id}','${f.memberId}')">تعديل</button><button class="btn btn-danger btn-sm" onclick="Followups.remove('${f.id}')">حذف</button></div>`},
+      {h:'المخدوم', key:'memberName'}, {h:'الحالة', render:fupStatusPill}, {h:'التاريخ', render:f=>fmtDate(f.date)}, {h:'الموعد', render:f=>f.nextDate ? fmtDate(f.nextDate) : '—'},
+      {h:'الخادم', key:'servantName'}, {h:'النوع', key:'type'}, {h:'الموضوع', key:'subject'},
+      {h:'', render:f=>`<div class="row-actions">${fupIsOpen(f) ? `<button class="btn btn-primary btn-sm" onclick="Followups.markDone('${f.id}')">✔ تمت</button>` : ''}<button class="btn btn-ghost btn-sm" onclick="Followups.openForm('${f.id}','${f.memberId}')">تعديل</button><button class="btn btn-danger btn-sm" onclick="Followups.remove('${f.id}')">حذف</button></div>`}
     ]
   });
 };
-Followups.openForm = function(id, memberId){
-  const f = id ? byId(DB.followups,id) : {};
+Followups.openForm = function(id, memberId, pre){
+  Followups._stay = !!(pre && pre.stay);   // لو اتفتح من صفحة تانية (زي لوحة الغائبين) مانرجّعش المستخدم لصفحة المتابعة بعد الحفظ
+  const f = id ? byId(DB.followups,id) : {...(pre||{})};
   const followupTypeOptions = [...new Set(['غياب','سلوكي','روحي','دراسي','أسري','أخرى', ...(DB.settings.followupTypes||[])])];
-  UI.openModal(id?'تعديل متابعة':'متابعة جديدة', `
+  UI.openModal(id?'تعديل متابعة':(fupIsOpen(f)?'مهمة متابعة جديدة':'متابعة جديدة'), `
     <div class="form-grid">
       ${memberId? `<div class="field"><label>المخدوم</label><input value="${esc(nameOf(DB.members,memberId))}" disabled></div>` : memberPickerHtml('f-member', f.memberId)}
       <div class="field"><label>التاريخ</label><input type="date" id="f-date" value="${f.date||todayISO()}"></div>
+      <div class="field"><label>الحالة</label><select id="f-status"><option value="done" ${!fupIsOpen(f)?'selected':''}>✅ تمت (سجل اتعمل)</option><option value="open" ${fupIsOpen(f)?'selected':''}>⏳ مفتوحة (مهمة لسه مطلوبة)</option></select></div>
       <div class="field"><label>الخادم المسؤول</label><select id="f-servant">${selectOptions(DB.servants,f.servantId)}</select></div>
       <div class="field"><label>نوع المتابعة</label><select id="f-type">
         ${followupTypeOptions.map(t=>`<option ${f.type===t?'selected':''}>${esc(t)}</option>`).join('')}
@@ -3960,25 +4110,45 @@ Followups.openForm = function(id, memberId){
       <div class="field full"><label>موضوع المتابعة</label><input id="f-subject" value="${esc(f.subject||'')}"></div>
       <div class="field full"><label>الملاحظات</label><textarea id="f-notes" rows="2">${esc(f.notes||'')}</textarea></div>
       <div class="field full"><label>الإجراء الذي تم اتخاذه</label><textarea id="f-action" rows="2">${esc(f.action||'')}</textarea></div>
-      <div class="field"><label>موعد المتابعة القادمة (اختياري)</label><input type="date" id="f-next" value="${f.nextDate||''}"></div>
+      <div class="field"><label>موعد المتابعة / الاستحقاق (اختياري)</label><input type="date" id="f-next" value="${f.nextDate||''}"></div>
     </div>
   `, `<button class="btn btn-primary" onclick="Followups.save('${id||''}','${memberId||''}')">حفظ</button><button class="btn btn-ghost" onclick="UI.closeModal()">إلغاء</button>`);
 };
 Followups.save = async function(id, fixedMemberId){
   const memberId = fixedMemberId || document.getElementById('f-member').value;
   if(!memberId) return toast('اختر المخدوم');
+  const status = document.getElementById('f-status').value === 'open' ? 'open' : 'done';
+  const prev = id ? byId(DB.followups,id) : null;
   const data = {
     memberId, date:document.getElementById('f-date').value, servantId:document.getElementById('f-servant').value,
     type:document.getElementById('f-type').value, subject:document.getElementById('f-subject').value.trim(),
     notes:document.getElementById('f-notes').value.trim(), action:document.getElementById('f-action').value.trim(),
     nextDate:document.getElementById('f-next').value,
+    status, doneAt: status === 'done' ? ((prev && fupIsOpen(prev)) ? todayISO() : ((prev && prev.doneAt) || '')) : '',
   };
   try{
     if(id){ await fsUpdate('followups', id, data); await log('تعديل متابعة', nameOf(DB.members,memberId)); }
-    else { await fsAdd('followups', data); await log('إضافة متابعة', nameOf(DB.members,memberId)); }
+    else { await fsAdd('followups', data); await log(status==='open' ? 'إضافة مهمة متابعة' : 'إضافة متابعة', nameOf(DB.members,memberId)); }
     UI.closeModal(); toast('تم الحفظ بنجاح');
+    if(Followups._stay){ Followups._stay = false; return; }
     App.navigate(fixedMemberId?'memberProfile':'followups', fixedMemberId||undefined);
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
+};
+Followups.markDone = async function(id){
+  const f = byId(DB.followups,id); if(!f) return;
+  try{
+    await fsUpdate('followups', id, {status:'done', doneAt: todayISO()});
+    await log('إنجاز متابعة', nameOf(DB.members,f.memberId));
+    toast('✔ تم تعليم المتابعة كمنجزة');
+  }catch(e){ console.error(e); toast('تعذر التحديث: '+e.message); }
+};
+/* تسجيل متابعة "تمت" بسرعة (بيتستخدم من لوحة افتقاد الغائبين لما واتساب يتفتح). مابيكررش نفس السجل في نفس اليوم. */
+Followups.logQuick = async function(o){
+  const date = todayISO();
+  if(DB.followups.some(f=>f.memberId===o.memberId && f.date===date && f.type===o.type && f.action===o.action)) return false;
+  await fsAdd('followups', {memberId:o.memberId, date, servantId:'', type:o.type, subject:o.subject||'', notes:'', action:o.action||'', nextDate:'', status:'done', doneAt:date, auto:true});
+  await log('إضافة متابعة', nameOf(DB.members,o.memberId)+' (تلقائي)');
+  return true;
 };
 Followups.remove = async function(id){
   if(!confirm('حذف سجل المتابعة؟')) return;
@@ -4183,8 +4353,8 @@ Reports.evaluationsReport = function(){
 };
 Reports.followupsReport = function(){
   reportShell('تقرير المتابعة الشامل', `
-    <table><thead><tr><th>التاريخ</th><th>المخدوم</th><th>الخادم</th><th>النوع</th><th>الموضوع</th></tr></thead>
-    <tbody>${DB.followups.map(f=>`<tr><td>${fmtDate(f.date)}</td><td>${esc(nameOf(DB.members,f.memberId))}</td><td>${esc(nameOf(DB.servants,f.servantId))}</td><td>${esc(f.type)}</td><td>${esc(f.subject)}</td></tr>`).join('')}</tbody></table>
+    <table><thead><tr><th>التاريخ</th><th>المخدوم</th><th>الخادم</th><th>النوع</th><th>الموضوع</th><th>الحالة</th><th>الموعد</th></tr></thead>
+    <tbody>${DB.followups.map(f=>`<tr><td>${fmtDate(f.date)}</td><td>${esc(nameOf(DB.members,f.memberId))}</td><td>${esc(nameOf(DB.servants,f.servantId))}</td><td>${esc(f.type)}</td><td>${esc(f.subject)}</td><td>${fupIsOpen(f) ? (fupIsOverdue(f) ? 'متأخرة' : 'مفتوحة') : 'تمت'}</td><td>${f.nextDate ? fmtDate(f.nextDate) : '—'}</td></tr>`).join('')}</tbody></table>
   `);
 };
 Reports.activitiesReport = function(){
@@ -4264,7 +4434,7 @@ Reports.annualData = function(from, to){
     activeMembers: DB.members.filter(m=>m.status!=='inactive').length, newMembers,
     servants: DB.servants.filter(s=>s.status!=='inactive').length,
     months, byClass, top, low, evalCount: evs.length, evalAvg: allCnt ? (allSum/allCnt).toFixed(1) : '—', criteria,
-    fupCount: fups.length, fupTypes, acts, actParticipations: acts.reduce((a,x)=>a+(x.participants||[]).length,0),
+    fupCount: fups.length, fupOpen: fups.filter(fupIsOpen).length, fupTypes, acts, actParticipations: acts.reduce((a,x)=>a+(x.participants||[]).length,0),
     bestMonth: withData.length ? withData.reduce((a,b)=>b.pct>a.pct?b:a) : null,
     worstMonth: withData.length > 1 ? withData.reduce((a,b)=>b.pct<a.pct?b:a) : null,
   };
@@ -4360,7 +4530,7 @@ Reports.annual = function(preset){
         <p style="margin:0 0 8px;">عدد التقييمات: <b>${D.evalCount}</b> · المتوسط العام: <b>${D.evalAvg}</b></p>
         <table>${th(['المعيار','المتوسط'])}<tbody>${D.criteria.length ? D.criteria.map(c=>`<tr><td>${esc(c.name)}</td><td>${c.avg}</td></tr>`).join('') : empty(2,'لا توجد تقييمات في الفترة.')}</tbody></table></div>
       <div><h3>🗂️ المتابعة الفردية</h3>
-        <p style="margin:0 0 8px;">إجمالي سجلات المتابعة: <b>${D.fupCount}</b></p>
+        <p style="margin:0 0 8px;">إجمالي سجلات المتابعة: <b>${D.fupCount}</b>${D.fupOpen ? ` · لسه مفتوحة: <b>${D.fupOpen}</b>` : ''}</p>
         <table>${th(['النوع','العدد'])}<tbody>${Object.keys(D.fupTypes).length ? Object.entries(D.fupTypes).sort((a,b)=>b[1]-a[1]).map(([t,n])=>`<tr><td>${esc(t)}</td><td>${n}</td></tr>`).join('') : empty(2,'لا توجد سجلات متابعة في الفترة.')}</tbody></table></div>
     </div></div>
 
@@ -5169,7 +5339,19 @@ document.getElementById('login-pass').addEventListener('keydown', e=>{ if(e.key=
 document.getElementById('login-user').addEventListener('keydown', e=>{ if(e.key==='Enter') document.getElementById('login-pass').focus(); });
 // رابط "تواصل معنا" العام في شاشة الدخول — بيتحمّل حتى قبل تسجيل الدخول
 // تسجيل الـ Service Worker (PWA) — بيسمح بتثبيت النظام كتطبيق على شاشة الموبايل
+/* لما الـ Service Worker الجديد يستلم الصفحة (بعد نشر تحديث) نعرض شريط "نسخة جديدة" بدل ما المستخدم يفضل على النسخة القديمة من غير ما يعرف.
+   مابنعرضوش أول مرة تتثبّت فيها (مفيش نسخة قديمة أصلًا). "لاحقًا" مهمة عشان إعادة التحميل بتمسح أي حضور لسه ماتحفظش. */
+function showUpdateBanner(){
+  if(document.getElementById('update-banner')) return;
+  const b = document.createElement('div');
+  b.id = 'update-banner'; b.className = 'no-print';
+  b.style.cssText = 'position:fixed; bottom:16px; right:16px; left:16px; max-width:440px; margin:0 auto; z-index:500; background:#33383D; color:#fff; padding:10px 14px; border-radius:12px; display:flex; gap:10px; align-items:center; justify-content:space-between; box-shadow:0 6px 16px rgba(0,0,0,.25); font-size:13px;';
+  b.innerHTML = '<span>🔄 فيه نسخة جديدة من التطبيق</span><span style="display:flex; gap:8px;"><button class="btn btn-gold btn-sm" onclick="location.reload()">تحديث الآن</button><button class="btn btn-ghost btn-sm" onclick="document.getElementById(\'update-banner\').remove()">لاحقًا</button></span>';
+  document.body.appendChild(b);
+}
 if('serviceWorker' in navigator){
+  const swHadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener('controllerchange', ()=>{ if(swHadController) showUpdateBanner(); });
   window.addEventListener('load', ()=>{ navigator.serviceWorker.register('service-worker.js').catch(e=>console.error('SW register failed', e)); });
 }
 let PUBLIC_CONTACTS = {};
@@ -5261,4 +5443,4 @@ window.App = App; window.UI = UI; window.Members = Members; window.Servants = Se
 window.Stages = Stages; window.Attendance = Attendance; window.Evaluations = Evaluations;
 window.Followups = Followups; window.Activities = Activities; window.Reports = Reports;
 window.UsersV = UsersV; window.SettingsV = SettingsV; window.BackupV = BackupV; window.TrashV = TrashV;
-window.WA = WA;
+window.WA = WA; window.Onboarding = Onboarding;
