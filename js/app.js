@@ -3,6 +3,8 @@
    نظام إدارة مدارس الأحد
    ========================================================= */
 
+/* رقم إصدار التطبيق: بيظهر أسفل القائمة الجانبية عشان تتأكد إنك رافع آخر نسخة. بيتزوّد مع كل تسليم جديد. */
+const APP_VERSION = '1.1 — رسوم الأنشطة';
 let DB = {settings:{schoolName:'مدرسة الأحد'}, stages:[], grades:[], classes:[], members:[], servants:[],
   attendance:[], evaluations:[], followups:[], activities:[], auditLog:[], users:[],
   paymentMethods:[], paymentProofs:[], chatMessages:[], tickets:[], plans:[]}; // ذاكرة مؤقتة تُزامَن تلقائيًا مع Firestore
@@ -366,7 +368,60 @@ const TRIAL_DAYS = 14;
 const LIVE_COLLECTIONS = ['stages','grades','classes','members','servants','attendance','evaluations','followups','activities'];
 let unsubscribers = [];
 
-function detachListeners(){ unsubscribers.forEach(u=>u()); unsubscribers = []; }
+/* ---------- تقييد الخادم بفصله (Scope) ----------
+   لما المدير يشغّل "تقييد الخادم بفصله" من الإعدادات، حساب "خادم" مربوط بسجل خادم بيشوف بيانات فصوله بس:
+   الفصول/الصفوف/المراحل، المخدومين، الحضور، التقييمات، والمتابعات. بنطبّق ده في نقطة واحدة: بعد تحميل البيانات الخام (RAW)
+   بنبني منها DB المفلتر، فكل الصفحات والبحث والتقارير بتشوف المفلتر تلقائيًا. (تقييد في الواجهة — البيانات نفسها بتوصل للمتصفح.) */
+const RAW = {};
+const SCOPED_COLS = ['stages','grades','classes','members','attendance','evaluations','followups'];
+function servantClassIds(sv){ return [...new Set([sv && sv.classId, ...((sv && sv.extraClassIds) || [])].filter(Boolean))]; }
+const Scope = {};
+Scope.current = function(){
+  if(!CURRENT_USER || IMPERSONATING || CURRENT_USER.role !== 'servant') return null;
+  if(!(DB.settings && DB.settings.restrictServants)) return null;
+  const sv = CURRENT_USER.servantId ? (RAW.servants || DB.servants || []).find(s=>s.id === CURRENT_USER.servantId) : null;
+  return { linked: !!sv, servantId: sv ? sv.id : null, classIds: new Set(sv ? servantClassIds(sv) : []) };
+};
+Scope.apply = function(){
+  const sc = Scope.current();
+  const src = c => RAW[c] || [];
+  if(!sc){ SCOPED_COLS.forEach(c=>{ if(RAW[c]) DB[c] = RAW[c]; }); return; }
+  const cls = src('classes').filter(c=>sc.classIds.has(c.id));
+  const gradeIds = new Set(cls.map(c=>c.gradeId)), stageIds = new Set(cls.map(c=>c.stageId));
+  const members = src('members').filter(m=>sc.classIds.has(m.classId));
+  const memberIds = new Set(members.map(m=>m.id));
+  DB.classes = cls;
+  DB.grades = src('grades').filter(g=>gradeIds.has(g.id));
+  DB.stages = src('stages').filter(s=>stageIds.has(s.id));
+  DB.members = members;
+  DB.attendance = src('attendance').filter(a=>sc.classIds.has(a.classId) || memberIds.has(a.memberId));
+  DB.evaluations = src('evaluations').filter(e=>memberIds.has(e.memberId));
+  DB.followups = src('followups').filter(f=>memberIds.has(f.memberId));
+};
+Scope.banner = function(){
+  const sc = Scope.current(); if(!sc) return '';
+  const names = [...sc.classIds].map(id=>nameOf(DB.classes, id)).filter(Boolean).join('، ');
+  const msg = !sc.linked
+    ? '🔒 حسابك لسه مش مربوط بسجل خادم، فمفيش بيانات ظاهرة. كلّم مدير الكنيسة يربط حسابك من "المستخدمون والصلاحيات".'
+    : (sc.classIds.size ? `🔒 بتشوف بيانات فصولك بس: <b>${esc(names)}</b>` : '🔒 مفيش فصل متسجّل لك لسه، فمفيش بيانات ظاهرة. كلّم مدير الكنيسة.');
+  return `<div class="card card-pad no-print" style="margin-bottom:14px; ${sc.linked && sc.classIds.size ? '' : 'border-color:var(--absent);'}">${msg}</div>`;
+};
+Scope.settingsCardHtml = function(){
+  const on = !!DB.settings.restrictServants;
+  const svUsers = (DB.users || []).filter(u=>u.role === 'servant');
+  const unlinked = svUsers.filter(u=>!u.servantId || !byId(DB.servants, u.servantId));
+  const noClass = DB.servants.filter(s=>s.status !== 'inactive' && !servantClassIds(s).length);
+  return `<div class="section-head" style="margin-top:26px;"><h2>🔒 تقييد الخادم بفصله</h2></div>
+    <div class="card card-pad" style="max-width:760px; margin-bottom:10px;">
+      <p class="muted" style="margin:0 0 10px;">لما تشغّله، حساب "خادم" بيشوف ويسجّل حضور فصوله بس (المخدومين، الحضور، التقييمات، المتابعات). المدير والمستخدم الإداري بيشوفوا كل حاجة. لازم الأول تربط كل حساب خادم بسجله من "المستخدمون والصلاحيات"، وتحدد فصل الخادم من صفحة الخدام.</p>
+      <p style="margin:0 0 8px;">حسابات الخدام: <b>${svUsers.length}</b> · مربوطة: <b>${svUsers.length - unlinked.length}</b></p>
+      ${unlinked.length ? `<p style="margin:0 0 8px; color:var(--absent);">⚠️ حسابات خدام مش مربوطة (هيشوفوا لا حاجة لو شغّلت التقييد): ${unlinked.map(u=>esc(u.name)).join('، ')}</p>` : ''}
+      ${noClass.length ? `<p style="margin:0 0 8px; color:var(--absent);">⚠️ خدام من غير فصل: ${noClass.map(s=>esc(s.name)).join('، ')}</p>` : ''}
+      <label style="display:flex; gap:8px; align-items:center; cursor:pointer; font-weight:600; margin-top:10px;"><input type="checkbox" id="set-restrict" ${on?'checked':''} onchange="SettingsV.setRestrictServants(this.checked)"> تقييد الخادم بفصله</label>
+      <p class="muted" style="margin:10px 0 0; font-size:12.5px;">ملاحظة: ده تقييد في الواجهة (بيمنع العرض الغلط)، مش حماية كاملة على السيرفر.</p>
+    </div>`;
+};
+function detachListeners(){ unsubscribers.forEach(u=>u()); unsubscribers = []; Object.keys(RAW).forEach(k=>delete RAW[k]); }
 
 function attachListeners(onReady){
   const isAdmin = CURRENT_USER && (CURRENT_USER.role==='admin' || IMPERSONATING);
@@ -385,7 +440,9 @@ function attachListeners(onReady){
   LIVE_COLLECTIONS.forEach(col=>{
     const q = query(collection(dbFire, col), where('churchId','==',CURRENT_CHURCH_ID));
     const unsub = onSnapshot(q, snap=>{
-      DB[col] = snap.docs.map(d=>({id:d.id, ...d.data()})).filter(x=>!x.deletedAt);
+      RAW[col] = snap.docs.map(d=>({id:d.id, ...d.data()})).filter(x=>!x.deletedAt);
+      DB[col] = RAW[col];
+      if(SCOPED_COLS.includes(col) || col === 'servants') Scope.apply();
       tick();
     }, err=>{ console.error(col, err); toast('تعذر تحميل بيانات: '+col); });
     unsubscribers.push(unsub);
@@ -394,9 +451,20 @@ function attachListeners(onReady){
   const unsubSettings = onSnapshot(doc(dbFire,'settings',CURRENT_CHURCH_ID), d=>{
     DB.settings = d.exists() ? d.data() : {churchName: CURRENT_CHURCH?CURRENT_CHURCH.name:'', schoolName:'مدرسة الأحد', contact:CURRENT_CHURCH?CURRENT_CHURCH.contactPhone:''};
     document.getElementById('church-name-label').textContent = DB.settings.churchName || 'إدارة مدارس الأحد';
+    Scope.apply();
     tick();
   }, err=>console.error(err));
   unsubscribers.push(unsubSettings);
+
+  // حساب المستخدم نفسه لحظيًا: لو المدير ربطه بسجل خادم (servantId) يتحدّث التقييد من غير ما يعمل تسجيل دخول تاني
+  if(!IMPERSONATING && CURRENT_USER && CURRENT_USER.uid){
+    const unsubMe = onSnapshot(doc(dbFire,'users',CURRENT_USER.uid), d=>{
+      if(!d.exists()) return;
+      const sid = d.data().servantId || '';
+      if((CURRENT_USER.servantId || '') !== sid){ CURRENT_USER.servantId = sid; Scope.apply(); renderCurrent(); }
+    }, err=>console.error(err));
+    unsubscribers.push(unsubMe);
+  }
 
   const auditQ = query(collection(dbFire,'auditLog'), where('churchId','==',CURRENT_CHURCH_ID), orderBy('date','desc'), limit(200));
   const unsubAudit = onSnapshot(auditQ, snap=>{
@@ -2538,6 +2606,12 @@ function buildNav(){
       const locked = CHURCH_ACCESS_LOCKED && !CHURCH_LOCKED_ALLOWED_PAGES.includes(it.id);
       return `<li><a class="nav-a${locked?' nav-locked':''}" data-page="${it.id}" onclick="App.navigate('${it.id}')"><span class="ic">${it.ic}</span>${it.label}${locked?' 🔒':''}${it.badge?` <span class="badge-count" id="nav-badge-${it.id}" style="display:none;">0</span>`:''}</a></li>`;
     }).join('');
+  const ub = document.querySelector('#sidebar .user-box');
+  if(ub && !document.getElementById('app-version')){
+    const d = document.createElement('div'); d.id = 'app-version'; d.className = 'muted';
+    d.style.cssText = 'font-size:11px; margin-top:6px; opacity:.7;'; d.textContent = 'الإصدار ' + APP_VERSION;
+    ub.appendChild(d);
+  }
 }
 /* تحديث عدد رسائل غير مقروءة (أو أي عدّاد) جنب عنصر في القائمة الجانبية للكنيسة */
 App.updateNavBadge = function(id, count){
@@ -2664,7 +2738,10 @@ Views.dashboard = function(){
     return c>d;
   }).length;
   const needFollowup = computeNeedFollowup();
-  const openTasks = D.followups.filter(fupIsOpen).sort(fupPriorityCompare);
+  const mySv = CURRENT_USER && CURRENT_USER.servantId ? byId(D.servants, CURRENT_USER.servantId) : null;
+  const taskScope = mySv ? Followups._dashScope : 'all';
+  const allOpenTasks = D.followups.filter(fupIsOpen);
+  const openTasks = (taskScope === 'mine' ? allOpenTasks.filter(f=>f.servantId === mySv.id) : allOpenTasks).sort(fupPriorityCompare);
   const upcomingBirthdays = (()=>{
     const now = new Date(); now.setHours(0,0,0,0);
     return activeMembers.filter(m=>m.birthDate).map(m=>{
@@ -2680,7 +2757,9 @@ Views.dashboard = function(){
   const monthPresentPct = monthAtt.length ? Math.round(monthAtt.filter(a=>a.present).length/monthAtt.length*100) : 0;
 
   $content().innerHTML = `
+    ${Scope.banner()}
     ${Onboarding.card()}
+    ${DataQuality.dashboardHint()}
     <div class="stat-grid">
       ${statCard('إجمالي المخدومين', activeMembers.length,'', "App.navigate('members')")}
       ${statCard('إجمالي الخدام', D.servants.filter(s=>s.status!=='inactive').length,'', "App.navigate('servants')")}
@@ -2721,11 +2800,11 @@ Views.dashboard = function(){
           : `<p class="muted">لا يوجد حاليًا مخدومون بحاجة لمتابعة عاجلة 🎉</p>`}
       </div>
       <div class="card card-pad">
-        <div class="section-head"><h2>🗂️ متابعات مطلوبة (${openTasks.length})</h2>${openTasks.length>6 ? `<a style="cursor:pointer; font-size:12.5px;" onclick="Followups._filter='open'; App.navigate('followups')">عرض الكل</a>` : ''}</div>
+        <div class="section-head"><h2>🗂️ ${taskScope==='mine' ? 'مهامي' : 'متابعات مطلوبة'} (${openTasks.length})</h2><span style="font-size:12.5px;">${mySv ? `<a style="cursor:pointer;" onclick="Followups.setDashScope('${taskScope==='mine'?'all':'mine'}')">${taskScope==='mine' ? `عرض كل المتابعات (${allOpenTasks.length})` : 'مهامي فقط'}</a> · ` : ''}${openTasks.length>6 ? `<a style="cursor:pointer;" onclick="Followups._filter='open'; App.navigate('followups')">عرض الكل</a>` : ''}</span></div>
         ${openTasks.length ? `<table><tbody>${openTasks.slice(0,6).map(f=>{ const m = byId(D.members, f.memberId); return `
           <tr><td class="name-cell"><span class="nm" onclick="App.navigate('memberProfile','${f.memberId}')">${esc(m?m.name:'—')}</span><div class="muted" style="font-size:12px;">${esc(f.type||'')}${f.subject ? ' — '+esc(f.subject) : ''}</div></td>
           <td>${fupStatusPill(f)}</td>
-          <td><div class="row-actions"><button class="btn btn-primary btn-sm" title="تمت" onclick="Followups.markDone('${f.id}')">✔</button>${m && (m.phone||m.guardianPhone) ? `<button class="btn btn-ghost btn-sm" title="رسالة واتساب" onclick="WA.openModal('${f.memberId}','${f.type==='غياب'?'absence':'custom'}')">💬</button>` : ''}</div></td></tr>`; }).join('')}</tbody></table>` : `<p class="muted">مفيش متابعات مفتوحة 🎉</p>`}
+          <td><div class="row-actions"><button class="btn btn-primary btn-sm" title="تمت" onclick="Followups.markDone('${f.id}')">✔</button>${m && (m.phone||m.guardianPhone) ? `<button class="btn btn-ghost btn-sm" title="رسالة واتساب" onclick="WA.openModal('${f.memberId}','${f.type==='غياب'?'absence':'custom'}')">💬</button>` : ''}</div></td></tr>`; }).join('')}</tbody></table>` : `<p class="muted">${taskScope==='mine' ? 'مفيش مهام مسندة ليك 🎉' : 'مفيش متابعات مفتوحة 🎉'}</p>`}
       </div>
       <div class="card card-pad">
         <div class="section-head"><h2>آخر العمليات</h2></div>
@@ -3091,6 +3170,7 @@ Views.members = function(){
   });
 };
 Members.openForm = function(id){
+  Members._afterSave = null;   // بيتحدد بعد الفتح لو النموذج اتفتح من تقرير (زي فحص جودة البيانات) ونفضل فيه بعد الحفظ
   const m = id ? byId(DB.members,id) : {};
   UI.openModal(id?'تعديل بيانات مخدوم':'إضافة مخدوم جديد', `
     <div class="form-grid">
@@ -3144,6 +3224,7 @@ Members.save = async function(id){
     if(id){ await fsUpdate('members', id, data); await log('تعديل مخدوم', name); }
     else { await fsAdd('members', {...data, createdAt: Date.now()}); await log('إضافة مخدوم', name); }
     UI.closeModal(); toast('تم الحفظ بنجاح');
+    { const cb = Members._afterSave; Members._afterSave = null; if(cb){ cb(); return; } }
     App.navigate(CURRENT_PAGE==='memberProfile'?'members':CURRENT_PAGE);
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
 };
@@ -3153,7 +3234,9 @@ Members.remove = async function(id){
   try{
     await updateDoc(doc(dbFire,'members',id), {deletedAt: Date.now()});
     await log('نقل مخدوم لسلة المحذوفات', m.name);
-    App.navigate('members'); toast('تم النقل لسلة المحذوفات');
+    toast('تم النقل لسلة المحذوفات');
+    { const cb = Members._afterSave; Members._afterSave = null; if(cb){ cb(); return; } }
+    App.navigate('members');
   }catch(e){ console.error(e); toast('تعذر الحذف: '+e.message); }
 };
 
@@ -3324,9 +3407,9 @@ Views.servants = function(){
       {h:'الجنس', key:'gender'},
       {h:'المرحلة', render:s=>esc(nameOf(DB.stages,s.stageId))},
       {h:'الصف', render:s=>esc(nameOf(DB.grades,s.gradeId))},
-      {h:'الفصل', render:s=>esc(nameOf(DB.classes,s.classId))},
+      {h:'الفصل', render:s=>esc(servantClassIds(s).map(id=>nameOf(DB.classes,id)).join('، ') || '—')},
       {h:'الهاتف', key:'phone'},
-      {h:'عدد المخدومين', render:s=>DB.members.filter(m=>m.classId===s.classId).length},
+      {h:'عدد المخدومين', render:s=>{ const ids = servantClassIds(s), sc = Scope.current(); if(sc && !ids.some(id=>sc.classIds.has(id))) return '—'; return DB.members.filter(m=>ids.includes(m.classId)).length; }},
       {h:'الحالة', render:s=>statusPill(s.status)},
       {h:'', render:s=>`<div class="row-actions"><button class="btn btn-ghost btn-sm" onclick="Servants.openForm('${s.id}')">تعديل</button><button class="btn btn-danger btn-sm" onclick="Servants.remove('${s.id}')">حذف</button></div>`},
     ]
@@ -3348,6 +3431,7 @@ Servants.viewProfile = function(id){
   `, `<button class="btn btn-ghost" onclick="UI.closeModal()">إغلاق</button>`);
 };
 Servants.openForm = function(id){
+  Servants._afterSave = null;
   const s = id ? byId(DB.servants,id) : {};
   UI.openModal(id?'تعديل بيانات خادم':'إضافة خادم جديد', `
     <div class="form-grid">
@@ -3361,6 +3445,9 @@ Servants.openForm = function(id){
       <div class="field"><label>الصف الدراسي</label><select id="f-grade" onchange="Servants._refreshClass()">${selectOptions(gradesOfStage(s.stageId), s.gradeId)}</select></div>
       <div class="field"><label>الفصل</label><select id="f-class">${selectOptions(classesOfGrade(s.gradeId), s.classId)}</select></div>
       <div class="field"><label>الحالة</label><select id="f-status"><option value="active" ${s.status!=='inactive'?'selected':''}>نشط</option><option value="inactive" ${s.status==='inactive'?'selected':''}>غير نشط</option></select></div>
+      <div class="field full"><label>فصول إضافية (لو بيخدم أكتر من فصل)</label>
+        <div class="checklist" id="f-extra-classes">${DB.classes.map(c=>`<label><input type="checkbox" value="${c.id}" ${(s.extraClassIds||[]).includes(c.id)?'checked':''}> ${esc(nameOf(DB.stages,c.stageId))} — ${esc(c.name)}</label>`).join('') || '<span class="muted">مفيش فصول.</span>'}</div>
+      </div>
       <div class="field full"><label>ملاحظات</label><textarea id="f-notes" rows="2">${esc(s.notes||'')}</textarea></div>
     </div>
   `, `<button class="btn btn-primary" onclick="Servants.save('${id||''}')">حفظ</button><button class="btn btn-ghost" onclick="UI.closeModal()">إلغاء</button>`);
@@ -3389,12 +3476,15 @@ Servants.save = async function(id){
     startDate:document.getElementById('f-start').value, stageId:document.getElementById('f-stage').value,
     gradeId:document.getElementById('f-grade').value,
     classId:document.getElementById('f-class').value, status:document.getElementById('f-status').value,
+    extraClassIds:[...document.querySelectorAll('#f-extra-classes input:checked')].map(i=>i.value).filter(v=>v && v !== document.getElementById('f-class').value),
     notes:document.getElementById('f-notes').value.trim(),
   };
   try{
     if(id){ await fsUpdate('servants', id, data); await log('تعديل خادم', name); }
     else { await fsAdd('servants', data); await log('إضافة خادم', name); }
-    UI.closeModal(); toast('تم الحفظ بنجاح'); App.navigate('servants');
+    UI.closeModal(); toast('تم الحفظ بنجاح');
+    { const cb = Servants._afterSave; Servants._afterSave = null; if(cb){ cb(); return; } }
+    App.navigate('servants');
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
 };
 Servants.remove = async function(id){
@@ -3543,12 +3633,13 @@ const WA_TEMPLATES = [
   {key:'reminder', ic:'⏰', label:'تذكير بالاجتماع', text:'سلام ونعمة 🙏 تذكير بميعاد {المدرسة} يوم {الأحد_القادم} في {الكنيسة}. مستنيين {الاسم} معانا 💛'},
   {key:'welcome',  ic:'👋', label:'ترحيب بمخدوم جديد', text:'أهلاً وسهلاً بـ{الاسم} في {المدرسة} — {الكنيسة} 🙏 فرحانين بانضمام{ه} لينا، وفصل{ه} هو {الفصل}. ربنا يبارك.'},
   {key:'thanks',   ic:'🌟', label:'شكر وتشجيع', text:'سلام ونعمة 🙏 شكرًا على انتظام {الاسم} في {المدرسة} 🌟 ربنا يبارك في{ه} ويثبّت{ه} في طريق النمو.'},
+  {key:'payment',  ic:'💰', label:'تذكير برسوم نشاط', text:'سلام ونعمة 🙏 تذكير بسيط برسوم "{النشاط}": المتبقي على {الاسم} {المبلغ_المتبقي} جنيه. شكرًا ليكم وربنا يبارك 🙏'},
   {key:'custom',   ic:'✏️', label:'رسالة مفتوحة', text:'سلام ونعمة يا {الاسم} 🙏\n'},
 ];
 const WA_PLACEHOLDERS = [
   ['{الاسم}','الاسم الأول'], ['{الاسم_بالكامل}','الاسم بالكامل'], ['{ه}','"ه" للذكر و"ها" للأنثى'],
   ['{الفصل}','الفصل'], ['{الصف}','الصف'], ['{المرحلة}','المرحلة'], ['{الكنيسة}','اسم الكنيسة'], ['{المدرسة}','اسم المدرسة'],
-  ['{التاريخ}','تاريخ النهاردة'], ['{الأحد_القادم}','تاريخ الأحد الجاي'], ['{الخادم}','اسمك'],
+  ['{التاريخ}','تاريخ النهاردة'], ['{الأحد_القادم}','تاريخ الأحد الجاي'], ['{درس_الأحد_القادم}','عنوان درس الأحد الجاي لمرحلة المخدوم (لو متسجّل)'], ['{آية_الأحد_القادم}','آية الأحد الجاي'], ['{النشاط}','اسم النشاط (في رسالة الرسوم)'], ['{المبلغ_المتبقي}','المتبقي على المخدوم (في رسالة الرسوم)'], ['{المبلغ_المطلوب}','رسوم الفرد (في رسالة الرسوم)'], ['{الخادم}','اسمك'],
 ];
 function _waDateLabel(d){ return d.toLocaleDateString('ar-EG',{weekday:'long', day:'numeric', month:'long'}); }
 const WA = {_mid:null};
@@ -3557,7 +3648,7 @@ WA.getTemplate = function(key){
   const custom = ((DB.settings && DB.settings.waTemplates) || {})[key];
   return (typeof custom==='string' && custom.trim()) ? custom : (def ? def.text : '');
 };
-WA.fill = function(text, m){
+WA.fill = function(text, m, ctx){
   const cls = byId(DB.classes, m.classId), grade = byId(DB.grades, m.gradeId), stage = byId(DB.stages, m.stageId);
   const s = DB.settings || {};
   const full = String(m.name||'').trim();
@@ -3570,7 +3661,9 @@ WA.fill = function(text, m){
     'الكنيسة': s.churchName || (CURRENT_CHURCH && CURRENT_CHURCH.name) || 'الكنيسة',
     'المدرسة': s.schoolName || 'مدرسة الأحد',
     'التاريخ': _waDateLabel(today), 'الأحد_القادم': _waDateLabel(sunday),
+    'درس_الأحد_القادم': (getLesson(localISO(sunday), m.stageId) || {}).title || '', 'آية_الأحد_القادم': (getLesson(localISO(sunday), m.stageId) || {}).verse || '',
     'الخادم': CURRENT_USER ? CURRENT_USER.name : '',
+    ...(ctx || {}),
   };
   return String(text||'').replace(/\{([^{}]+)\}/g, (all,k)=>{ k=k.trim(); return Object.prototype.hasOwnProperty.call(vars,k) ? vars[k] : all; });
 };
@@ -3808,6 +3901,7 @@ Attendance.render = function(){
   const members = DB.members.filter(m=>m.classId===classId && m.status!=='inactive');
   if(!members.length){ body.innerHTML = `<div class="card"><div class="empty-state">لا يوجد مخدومون في هذا الفصل</div></div>`; return; }
   body.innerHTML = `
+    <div id="att-lesson" class="no-print">${Attendance.lessonHtml()}</div>
     <div class="card">
       <div class="section-head card-pad" style="margin-bottom:0;">
         <h2 style="font-size:14px;">${fmtDate(date)} — ${esc(nameOf(DB.classes,classId))} (${members.length} مخدوم)</h2>
@@ -4067,14 +4161,16 @@ function fupPriorityCompare(a, b){
   const rank = f => { const d = fupDaysToDue(f); return d === null ? 2 : (d < 0 ? 0 : 1); };
   return rank(a) - rank(b) || String(a.nextDate||'').localeCompare(String(b.nextDate||'')) || String(a.date||'').localeCompare(String(b.date||''));
 }
-const Followups = {_filter:'', _stay:false};
+const Followups = {_filter:'', _stay:false, _dashScope:'mine'};
+Followups.setDashScope = function(v){ Followups._dashScope = v; App.navigate('dashboard'); };
+function mySvId(){ return (CURRENT_USER && CURRENT_USER.servantId && byId(DB.servants, CURRENT_USER.servantId)) ? CURRENT_USER.servantId : ''; }
 Views.followups = function(){
   const openCount = DB.followups.filter(fupIsOpen).length, overdueCount = DB.followups.filter(fupIsOverdue).length;
   const sel = v => Followups._filter === v ? 'selected' : '';
   listPage({
     title:'المتابعة الفردية', addLabel:'متابعة جديدة', onAdd:'Followups.openForm()',
     searchFields:[],
-    filtersHtml:`<select id="fu-status" onchange="_lpRender()"><option value="">كل الحالات</option><option value="open" ${sel('open')}>مفتوحة (${openCount})</option><option value="overdue" ${sel('overdue')}>متأخرة (${overdueCount})</option><option value="done" ${sel('done')}>تمت</option></select>`,
+    filtersHtml:`<select id="fu-status" onchange="_lpRender()"><option value="">كل الحالات</option><option value="open" ${sel('open')}>مفتوحة (${openCount})</option><option value="overdue" ${sel('overdue')}>متأخرة (${overdueCount})</option><option value="done" ${sel('done')}>تمت</option>${mySvId() ? `<option value="mine" ${sel('mine')}>مهامي (مفتوحة)</option>` : ''}</select>`,
     extraButtonsHtml:`<button class="btn btn-primary btn-sm" onclick="Followups.openForm(null,null,{status:'open'})">+ مهمة متابعة</button>`,
     rows:()=>{
       const el = document.getElementById('fu-status');
@@ -4083,6 +4179,7 @@ Views.followups = function(){
       if(Followups._filter === 'open') list = list.filter(fupIsOpen);
       else if(Followups._filter === 'overdue') list = list.filter(fupIsOverdue);
       else if(Followups._filter === 'done') list = list.filter(f=>!fupIsOpen(f));
+      else if(Followups._filter === 'mine') list = list.filter(f=>fupIsOpen(f) && f.servantId === mySvId());
       const opens = list.filter(fupIsOpen).sort(fupPriorityCompare);
       const dones = list.filter(f=>!fupIsOpen(f)).sort((a,b)=>new Date(b.date)-new Date(a.date));
       return [...opens, ...dones];
@@ -4103,7 +4200,7 @@ Followups.openForm = function(id, memberId, pre){
       ${memberId? `<div class="field"><label>المخدوم</label><input value="${esc(nameOf(DB.members,memberId))}" disabled></div>` : memberPickerHtml('f-member', f.memberId)}
       <div class="field"><label>التاريخ</label><input type="date" id="f-date" value="${f.date||todayISO()}"></div>
       <div class="field"><label>الحالة</label><select id="f-status"><option value="done" ${!fupIsOpen(f)?'selected':''}>✅ تمت (سجل اتعمل)</option><option value="open" ${fupIsOpen(f)?'selected':''}>⏳ مفتوحة (مهمة لسه مطلوبة)</option></select></div>
-      <div class="field"><label>الخادم المسؤول</label><select id="f-servant">${selectOptions(DB.servants,f.servantId)}</select></div>
+      <div class="field"><label>الخادم المسؤول</label><select id="f-servant">${selectOptions(DB.servants, f.servantId !== undefined ? f.servantId : mySvId())}</select></div>
       <div class="field"><label>نوع المتابعة</label><select id="f-type">
         ${followupTypeOptions.map(t=>`<option ${f.type===t?'selected':''}>${esc(t)}</option>`).join('')}
       </select></div>
@@ -4166,7 +4263,8 @@ Views.activities = function(){
     columns:[
       {h:'النشاط', key:'name'}, {h:'التاريخ', render:a=>fmtDate(a.date)}, {h:'المكان', key:'place'},
       {h:'المسؤول', key:'responsible'}, {h:'عدد المشاركين', render:a=>(a.participants||[]).length},
-      {h:'', render:a=>`<div class="row-actions"><button class="btn btn-ghost btn-sm" onclick="Activities.openForm('${a.id}')">تعديل</button><button class="btn btn-danger btn-sm" onclick="Activities.remove('${a.id}')">حذف</button></div>`},
+      {h:'الرسوم', render:a=>{ const f = actFinance(a); if(!f.hasFinance) return '<span class="muted">—</span>'; return `${fmtMoney(f.collected)} / ${fmtMoney(f.expected)} ${f.expected && f.collected >= f.expected ? '<span class="pill pill-present">مكتمل</span>' : ''}`; }},
+      {h:'', render:a=>`<div class="row-actions">${Scope.current() ? '' : `<button class="btn btn-primary btn-sm" title="الرسوم والمصروفات" onclick="Activities.finance('${a.id}')">💰</button>`}<button class="btn btn-ghost btn-sm" onclick="Activities.openForm('${a.id}')">تعديل</button><button class="btn btn-danger btn-sm" onclick="Activities.remove('${a.id}')">حذف</button></div>`},
     ]
   });
 };
@@ -4184,6 +4282,7 @@ Activities.openForm = function(id){
         <option value="">اختر خادمًا مسؤولًا</option>
         ${DB.servants.map(s=>`<option value="${esc(s.name)}" ${a.responsible===s.name?'selected':''}>${esc(s.name)}</option>`).join('')}
       </select></div>
+      <div class="field"><label>رسوم المشاركة للفرد (ج.م) — اختياري</label><input type="number" id="f-fee" min="0" step="any" value="${a.fee || ''}"></div>
       <div class="field full"><label>ملاحظات</label><textarea id="f-notes" rows="2">${esc(a.notes||'')}</textarea></div>
       <div class="field full"><label>المشاركون</label>
         <div class="toolbar" style="margin-bottom:8px;">
@@ -4216,12 +4315,107 @@ Activities.save = async function(id){
   const name = document.getElementById('f-name').value.trim(); if(!name) return toast('أدخل اسم النشاط');
   const participants = Array.from(document.querySelectorAll('.f-part:checked')).map(c=>c.value);
   const data = { name, date:document.getElementById('f-date').value, place:document.getElementById('f-place').value.trim(),
-    responsible:document.getElementById('f-resp').value.trim(), notes:document.getElementById('f-notes').value.trim(), participants };
+    responsible:document.getElementById('f-resp').value.trim(), notes:document.getElementById('f-notes').value.trim(), participants,
+    fee: Math.max(0, Number(document.getElementById('f-fee').value) || 0) };
   try{
     if(id){ await fsUpdate('activities', id, data); await log('تعديل نشاط', name); }
     else { await fsAdd('activities', data); await log('إضافة نشاط', name); }
     UI.closeModal(); toast('تم الحفظ بنجاح'); App.navigate('activities');
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
+};
+/* ---------- رسوم ومصروفات الأنشطة ----------
+   على مستند النشاط نفسه (من غير مجموعة جديدة ولا تعديل في القواعد): fee = رسوم الفرد، payments = {memberId:{paid,date,by}}، expenses = [{title,amount}].
+   التحديث بيتم بمسار الحقل (payments.<id>) للي اتغيّر بس، عشان خادمين يحصّلوا في نفس الوقت من غير ما واحد يمسح دفعات التاني. */
+function fmtNum(n){ n = Math.round((Number(n) || 0) * 100) / 100; return n.toLocaleString('en-US', {maximumFractionDigits:2}); }
+function fmtMoney(n){ return fmtNum(n) + ' ج'; }
+function actFinance(a){
+  const fee = Number(a.fee) || 0, parts = a.participants || [], pay = a.payments || {};
+  const paidOf = id => Number((pay[id] || {}).paid) || 0;
+  const expected = fee * parts.length;
+  const collected = Object.keys(pay).reduce((n, id)=>n + paidOf(id), 0);
+  const unpaid = parts.filter(id=>paidOf(id) < fee);
+  const remaining = parts.reduce((n, id)=>n + Math.max(0, fee - paidOf(id)), 0);
+  const expenses = (a.expenses || []).reduce((n, e)=>n + (Number(e.amount) || 0), 0);
+  return {fee, count:parts.length, expected, collected, remaining, unpaid, expenses, net: collected - expenses, hasFinance: fee > 0 || collected > 0 || expenses > 0};
+}
+Activities.finance = function(id){
+  if(Scope.current()){ toast('الرسوم متاحة للمدير والمستخدم الإداري فقط'); return; }
+  const a = byId(DB.activities, id); if(!a) return;
+  const pay = a.payments || {};
+  const ids = [...new Set([...(a.participants || []), ...Object.keys(pay)])];
+  const rows = ids.map(mid=>{ const m = byId(DB.members, mid); return {mid, name: m ? m.name : 'مخدوم محذوف', cls: m ? nameOf(DB.classes, m.classId) : '', isPart: (a.participants||[]).includes(mid), paid: Number((pay[mid]||{}).paid) || 0}; })
+    .sort((x,y)=>x.name.localeCompare(y.name, 'ar'));
+  const expenses = a.expenses || [];
+  UI.openModal('💰 ' + a.name, `
+    <div id="fin-summary" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:8px; margin-bottom:12px;"></div>
+    <div class="form-grid"><div class="field"><label>رسوم الفرد (ج.م)</label><input type="number" id="fin-fee" min="0" step="any" value="${a.fee || ''}" oninput="Activities.finRecalc()"></div></div>
+    <h3 style="font-size:14px; margin:6px 0;">المدفوعات (${rows.length})</h3>
+    ${rows.length ? `<table><tbody id="fin-rows">${rows.map(r=>`<tr data-mid="${r.mid}">
+      <td>${esc(r.name)}${r.isPart ? '' : ' <span class="muted" style="font-size:11.5px;">(مش في المشاركين)</span>'}<div class="muted" style="font-size:12px;">${esc(r.cls)}</div></td>
+      <td style="width:110px;"><input type="number" class="fin-paid" data-mid="${r.mid}" data-orig="${r.paid}" min="0" step="any" value="${r.paid || ''}" placeholder="0" oninput="Activities.finRecalc()"></td>
+      <td style="white-space:nowrap;"><button type="button" class="btn btn-ghost btn-sm" onclick="Activities.finFull('${r.mid}')">كامل</button> <button type="button" class="btn btn-ghost btn-sm" title="تذكير واتساب" onclick="Activities.remind('${id}','${r.mid}')">💬</button></td>
+      <td class="fin-status"></td></tr>`).join('')}</tbody></table>` : '<p class="muted">مفيش مشاركين متسجّلين في النشاط ده لسه — أضفهم من "تعديل".</p>'}
+    <h3 style="font-size:14px; margin:14px 0 6px;">المصروفات</h3>
+    <div id="fin-expenses">${expenses.map(e=>Activities._expenseRow(e.title, e.amount)).join('')}</div>
+    <button type="button" class="btn btn-ghost btn-sm" onclick="Activities.finAddExpense()">＋ مصروف</button>
+  `, `<button class="btn btn-primary" onclick="Activities.finSave('${id}')">حفظ</button><button class="btn btn-ghost" onclick="UI.closeModal()">إغلاق</button>`);
+  Activities.finRecalc();
+};
+Activities._expenseRow = function(title, amount){
+  return `<div class="fin-exp" style="display:flex; gap:8px; margin-bottom:6px;"><input class="fin-exp-title" placeholder="البند (مثلًا: أتوبيس)" value="${esc(title||'')}" style="flex:1;"><input type="number" class="fin-exp-amount" min="0" step="any" placeholder="المبلغ" value="${amount || ''}" style="width:110px;" oninput="Activities.finRecalc()"><button type="button" class="btn btn-danger btn-sm" onclick="this.closest('.fin-exp').remove(); Activities.finRecalc();">✕</button></div>`;
+};
+Activities.finAddExpense = function(){ document.getElementById('fin-expenses').insertAdjacentHTML('beforeend', Activities._expenseRow('', '')); };
+Activities.finFull = function(mid){
+  const fee = Number(document.getElementById('fin-fee').value) || 0;
+  const inp = document.querySelector(`.fin-paid[data-mid="${mid}"]`); if(inp){ inp.value = fee || ''; Activities.finRecalc(); }
+};
+/* بيحسب الملخص وحالة كل واحد من اللي مكتوب في الخانات (لحظيًا قبل الحفظ) */
+Activities.finRecalc = function(){
+  const fee = Number(document.getElementById('fin-fee').value) || 0;
+  const inputs = [...document.querySelectorAll('.fin-paid')];
+  let collected = 0, remaining = 0, partsCount = 0;
+  const a = null;
+  inputs.forEach(inp=>{
+    const paid = Number(inp.value) || 0; collected += paid;
+    const tr = inp.closest('tr'), isPart = !/مش في المشاركين/.test(tr.textContent), cell = tr.querySelector('.fin-status');
+    if(isPart){ partsCount++; remaining += Math.max(0, fee - paid); }
+    cell.innerHTML = !fee ? '' : paid >= fee ? (paid > fee ? '<span class="pill pill-present">زيادة</span>' : '<span class="pill pill-present">مدفوع</span>') : paid > 0 ? `<span class="pill" style="background:var(--gold-soft);">جزئي (باقي ${fmtNum(fee - paid)})</span>` : '<span class="pill pill-absent">لم يدفع</span>';
+  });
+  const expenses = [...document.querySelectorAll('.fin-exp-amount')].reduce((n, i)=>n + (Number(i.value) || 0), 0);
+  const box = (label, val, hi) => `<div style="background:var(--paper); border:1px solid var(--line); border-radius:9px; padding:8px 10px; ${hi ? 'border-color:var(--navy);' : ''}"><div class="muted" style="font-size:11.5px;">${label}</div><div style="font-weight:700;">${val}</div></div>`;
+  document.getElementById('fin-summary').innerHTML = box('المطلوب', fmtMoney(fee * partsCount)) + box('المحصّل', fmtMoney(collected)) + box('المتبقي', fmtMoney(remaining)) + box('المصروفات', fmtMoney(expenses)) + box('الصافي', fmtMoney(collected - expenses), true);
+};
+Activities.finSave = async function(id){
+  const a = byId(DB.activities, id); if(!a) return;
+  const updates = {};
+  const fee = Math.max(0, Number(document.getElementById('fin-fee').value) || 0);
+  if(fee !== (Number(a.fee) || 0)) updates.fee = fee;
+  document.querySelectorAll('.fin-paid').forEach(inp=>{
+    const mid = inp.dataset.mid, now = Math.max(0, Number(inp.value) || 0), before = Number((a.payments || {})[mid] && a.payments[mid].paid) || 0;
+    if(now !== before) updates['payments.' + mid] = {paid: now, date: todayISO(), by: (CURRENT_USER && CURRENT_USER.name) || ''};
+  });
+  const expenses = [...document.querySelectorAll('.fin-exp')].map(r=>({title: r.querySelector('.fin-exp-title').value.trim(), amount: Math.max(0, Number(r.querySelector('.fin-exp-amount').value) || 0)})).filter(e=>e.title || e.amount);
+  if(JSON.stringify(expenses) !== JSON.stringify((a.expenses || []).map(e=>({title:e.title||'', amount:Number(e.amount)||0})))) updates.expenses = expenses;
+  if(!Object.keys(updates).length){ toast('مفيش تغييرات للحفظ'); return; }
+  try{
+    await fsUpdate('activities', id, updates);
+    await log('تحديث رسوم/مصروفات نشاط', a.name);
+    UI.closeModal(); toast('تم حفظ الرسوم والمصروفات');
+  }catch(e){ console.error(e); toast('تعذر الحفظ: ' + e.message); }
+};
+/* تذكير واتساب برسوم النشاط: بيتفتح مباشرة (من غير ما نقفل نافذة التحصيل)، لولي الأمر لو رقمه موجود وإلا للمخدوم */
+Activities.remind = function(id, mid){
+  const a = byId(DB.activities, id), m = byId(DB.members, mid); if(!a || !m) return;
+  const fee = Number(document.getElementById('fin-fee').value) || 0;
+  const inp = document.querySelector(`.fin-paid[data-mid="${mid}"]`), paid = inp ? Number(inp.value) || 0 : 0;
+  const remaining = Math.max(0, fee - paid);
+  if(!fee){ toast('حدد رسوم الفرد الأول'); return; }
+  if(!remaining){ toast(m.name + ' مسدد بالكامل'); return; }
+  const phone = DataQuality.phoneIssue(m.guardianPhone) === '' ? m.guardianPhone : m.phone;
+  const url = waLink(phone, WA.fill(WA.getTemplate('payment'), m, {'النشاط': a.name, 'المبلغ_المتبقي': fmtNum(remaining), 'المبلغ_المطلوب': fmtNum(fee)}));
+  if(!url){ toast('مفيش رقم هاتف مسجّل لـ ' + m.name); return; }
+  if(!window.open(url, '_blank')){ toast('برجاء السماح بفتح نوافذ منبثقة عشان يتفتح واتساب'); return; }
+  log('تذكير برسوم نشاط', m.name + ' — ' + a.name);
 };
 Activities.remove = async function(id){
   if(!confirm('نقل النشاط لسلة المحذوفات؟ تقدر تسترجعه خلال ٣٠ يوم.')) return;
@@ -4235,6 +4429,9 @@ Views.reports = function(){
     <div class="section-head no-print"><h2>مركز التقارير</h2></div>
     <div class="info-card-grid no-print">
       ${reportCard('📘 التقرير السنوي','تقرير شامل قابل للطباعة للعام الدراسي: الحضور شهريًا، المراحل والفصول، الملتزمون، التقييمات، الأنشطة، المتابعة.','Reports.annual(\'school0\')')}
+      ${reportCard('💰 رسوم ومصروفات الأنشطة','المحصّل والمتبقي والمصروفات والصافي لكل نشاط، وقايمة غير المسددين.','Reports.activitiesFinance()')}
+      ${reportCard('📖 جدول المنهج','الدروس المسجّلة لكل مرحلة مع الآية ونسبة الحضور في يوم كل درس.','Reports.lessons()')}
+      ${reportCard('🧹 فحص جودة البيانات','بيكشف بيانات ناقصة أو غلط: أرقام هاتف، تواريخ ميلاد، فصول، أكواد مكررة، وأسماء مكررة — مع تعديل مباشر.','Reports.dataQuality()')}
       ${reportCard('كشف جميع المخدومين','قائمة كاملة ببيانات المخدومين مع المرحلة والفصل والحالة.','Reports.membersList()')}
       ${reportCard('كشف حضور خلال فترة','تقرير حضور وغياب تفصيلي حسب المرحلة/الفصل وفترة زمنية.','Reports.attendanceRange()')}
       ${reportCard('كشف حضور فردي','تقرير حضور وغياب مخدوم واحد بعينه خلال فترة محددة.','Reports.individualAttendance()')}
@@ -4364,6 +4561,245 @@ Reports.activitiesReport = function(){
   `);
 };
 
+/* تقرير رسوم ومصروفات الأنشطة: ملخص لكل نشاط (رسوم/محصّل/متبقي/مصروفات/صافي) + قايمة غير المسددين */
+Reports.activitiesFinance = function(noScroll){
+  const fEl = document.getElementById('fin-from'), tEl = document.getElementById('fin-to');
+  let [from, to] = Reports.annualRange('school0');
+  if(fEl && tEl && fEl.value && tEl.value){ from = fEl.value; to = tEl.value; }
+  if(from > to){ const t = from; from = to; to = t; }
+  const acts = DB.activities.filter(a=>String(a.date||'').slice(0,10) >= from && String(a.date||'').slice(0,10) <= to && actFinance(a).hasFinance)
+    .sort((a,b)=>String(a.date).localeCompare(String(b.date)));
+  const F = acts.map(a=>({a, f: actFinance(a)}));
+  const sum = k => F.reduce((n, x)=>n + x.f[k], 0);
+  document.getElementById('report-output').innerHTML = `
+    <div class="card card-pad">
+      <div class="section-head no-print"><h2>💰 رسوم ومصروفات الأنشطة</h2><div class="toolbar">
+        <input type="date" id="fin-from" value="${from}" onchange="Reports.activitiesFinance(true)"><span class="muted">إلى</span><input type="date" id="fin-to" value="${to}" onchange="Reports.activitiesFinance(true)">
+        <button class="btn btn-gold btn-sm" onclick="window.print()">طباعة / حفظ PDF</button></div></div>
+      <div style="text-align:center; margin:10px 0;"><b>تقرير رسوم ومصروفات الأنشطة</b> — ${esc((DB.settings||{}).churchName||'')}<br><span class="muted">${fmtDate(from)} إلى ${fmtDate(to)}</span></div>
+      <table><thead><tr><th>النشاط</th><th>التاريخ</th><th>المشاركون</th><th>رسوم الفرد</th><th>المطلوب</th><th>المحصّل</th><th>المتبقي</th><th>المصروفات</th><th>الصافي</th></tr></thead><tbody>
+        ${F.length ? F.map(({a,f})=>`<tr><td>${esc(a.name)}</td><td>${fmtDate(a.date)}</td><td>${f.count}</td><td>${fmtNum(f.fee)}</td><td>${fmtNum(f.expected)}</td><td>${fmtNum(f.collected)}</td><td>${fmtNum(f.remaining)}</td><td>${fmtNum(f.expenses)}</td><td><b>${fmtNum(f.net)}</b></td></tr>`).join('') + `<tr style="font-weight:800; background:var(--paper);"><td colspan="4">الإجمالي</td><td>${fmtNum(sum('expected'))}</td><td>${fmtNum(sum('collected'))}</td><td>${fmtNum(sum('remaining'))}</td><td>${fmtNum(sum('expenses'))}</td><td>${fmtNum(sum('net'))}</td></tr>` : `<tr><td colspan="9" class="muted">مفيش أنشطة عليها رسوم أو مصروفات في الفترة دي. حدد الرسوم من "الأنشطة" ← 💰.</td></tr>`}
+      </tbody></table>
+      ${F.filter(x=>x.f.fee > 0 && x.f.unpaid.length).map(({a,f})=>`<details class="ann-sec" style="margin-top:14px; break-inside:auto;" ${f.unpaid.length <= 10 ? 'open' : ''}>
+        <summary style="cursor:pointer; font-weight:700;">غير المسددين في "${esc(a.name)}" <span class="pill pill-absent">${f.unpaid.length}</span></summary>
+        <table><tbody>${f.unpaid.map(mid=>{ const m = byId(DB.members, mid), paid = Number(((a.payments||{})[mid]||{}).paid) || 0; return `<tr><td>${esc(m ? m.name : 'مخدوم محذوف')}</td><td class="muted">${esc(m ? nameOf(DB.classes, m.classId) : '')}</td><td>${paid ? 'دفع ' + fmtNum(paid) + ' — ' : ''}باقي <b>${fmtNum(Math.max(0, f.fee - paid))}</b></td></tr>`; }).join('')}</tbody></table></details>`).join('')}
+    </div>`;
+  const out = document.getElementById('report-output'); if(!noScroll && out.scrollIntoView) out.scrollIntoView({behavior:'smooth', block:'start'});
+};
+
+/* ---------- المنهج الأسبوعي ----------
+   درس كل أسبوع لكل مرحلة (العنوان + الآية + ملاحظات). بيتخزن جوه settings/{الكنيسة}.lessons كخريطة مفتاحها "التاريخ|المرحلة"
+   (من غير مجموعة جديدة في Firestore فمفيش تعديل في القواعد، وبيدخل في النسخة الاحتياطية). الدرس المحذوف = عنوان فاضي. */
+function lessonKey(date, stageId){ return date + '|' + stageId; }
+function getLesson(date, stageId){ const l = ((DB.settings || {}).lessons || {})[lessonKey(date, stageId)]; return l && l.title ? l : null; }
+function localISO(d){ return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'); }
+const Lessons = {};
+Lessons.openForm = function(date, stageId){
+  const cur = date && stageId ? getLesson(date, stageId) : null;
+  const l = cur || {};
+  Lessons._orig = cur ? {date, stageId} : null;
+  UI.openModal(cur ? 'تعديل درس' : 'تسجيل درس', `
+    <div class="form-grid">
+      <div class="field"><label>التاريخ</label><input type="date" id="l-date" value="${date || todayISO()}"></div>
+      <div class="field"><label>المرحلة</label><select id="l-stage">${selectOptions(DB.stages, stageId || '')}</select></div>
+      <div class="field full"><label>عنوان الدرس</label><input id="l-title" value="${esc(l.title||'')}"></div>
+      <div class="field full"><label>الآية / الحفظ</label><input id="l-verse" value="${esc(l.verse||'')}"></div>
+      <div class="field full"><label>ملاحظات (اختياري)</label><textarea id="l-notes" rows="2">${esc(l.notes||'')}</textarea></div>
+    </div>`,
+    `<button class="btn btn-primary" onclick="Lessons.save()">حفظ</button>${cur ? `<button class="btn btn-danger" onclick="Lessons.remove('${date}','${stageId}')">حذف الدرس</button>` : ''}<button class="btn btn-ghost" onclick="UI.closeModal()">إلغاء</button>`);
+};
+Lessons.save = async function(){
+  const date = document.getElementById('l-date').value, stageId = document.getElementById('l-stage').value, title = document.getElementById('l-title').value.trim();
+  if(!date || !stageId){ toast('اختار التاريخ والمرحلة'); return; }
+  if(!title){ toast('اكتب عنوان الدرس'); return; }
+  const orig = Lessons._orig, changedSlot = orig && (orig.date !== date || orig.stageId !== stageId);
+  if((!orig || changedSlot) && getLesson(date, stageId) && !confirm('فيه درس متسجّل بنفس التاريخ والمرحلة. تستبدله؟')) return;
+  const updates = {};
+  updates[lessonKey(date, stageId)] = { title, verse: document.getElementById('l-verse').value.trim(), notes: document.getElementById('l-notes').value.trim(), by: (CURRENT_USER && CURRENT_USER.name) || '', updatedAt: Date.now() };
+  if(changedSlot) updates[lessonKey(orig.date, orig.stageId)] = {title:'', verse:'', notes:''};
+  try{
+    await fsSet('settings', CURRENT_CHURCH_ID, {lessons: updates});
+    DB.settings.lessons = {...(DB.settings.lessons || {}), ...updates};   // تحديث فوري (الـ snapshot هيأكده)
+    await log('تسجيل درس', title);
+    UI.closeModal(); toast('تم حفظ الدرس'); Lessons.afterChange();
+  }catch(e){ console.error(e); toast('تعذر الحفظ: ' + e.message); }
+};
+Lessons.remove = async function(date, stageId){
+  if(!confirm('حذف الدرس ده؟')) return;
+  const updates = {}; updates[lessonKey(date, stageId)] = {title:'', verse:'', notes:''};
+  try{
+    await fsSet('settings', CURRENT_CHURCH_ID, {lessons: updates});
+    DB.settings.lessons = {...(DB.settings.lessons || {}), ...updates};
+    await log('حذف درس', date);
+    UI.closeModal(); toast('تم حذف الدرس'); Lessons.afterChange();
+  }catch(e){ console.error(e); toast('تعذر الحذف: ' + e.message); }
+};
+/* بعد أي تغيير: نحدّث الشريط في صفحة الحضور أو جدول المنهج المعروض (الصفحتين محميين من إعادة الرسم اللحظية) */
+Lessons.afterChange = function(){
+  if(CURRENT_PAGE === 'attendance') Attendance.refreshLesson();
+  else if(CURRENT_PAGE === 'reports' && document.getElementById('les-from')) Reports.lessons(true);
+};
+Attendance.lessonHtml = function(){
+  const classId = (document.getElementById('att-class') || {}).value, date = (document.getElementById('att-date') || {}).value;
+  const cls = byId(DB.classes, classId); if(!cls || !date) return '';
+  const stageName = nameOf(DB.stages, cls.stageId), l = getLesson(date, cls.stageId);
+  const wrap = inner => `<div class="card card-pad" style="margin-bottom:12px; display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">${inner}</div>`;
+  return l
+    ? wrap(`<div>📖 <b>درس ${fmtDate(date)} — ${esc(stageName)}:</b> ${esc(l.title)}${l.verse ? ` <span class="muted">— ${esc(l.verse)}</span>` : ''}${l.notes ? `<div class="muted" style="font-size:12.5px;">${esc(l.notes)}</div>` : ''}</div><button class="btn btn-ghost btn-sm" onclick="Lessons.openForm('${date}','${cls.stageId}')">تعديل</button>`)
+    : wrap(`<div class="muted">📖 مفيش درس متسجّل لمرحلة ${esc(stageName)} في ${fmtDate(date)}</div><button class="btn btn-ghost btn-sm" onclick="Lessons.openForm('${date}','${cls.stageId}')">＋ سجّل الدرس</button>`);
+};
+Attendance.refreshLesson = function(){ const el = document.getElementById('att-lesson'); if(el) el.innerHTML = Attendance.lessonHtml(); };
+/* جدول المنهج: الدروس المسجّلة في فترة (افتراضيًا العام الدراسي الحالي) لكل المراحل أو مرحلة، مع نسبة الحضور في يوم كل درس */
+Reports.lessonRows = function(from, to, stageId){
+  const stageOfClass = {}; DB.classes.forEach(c=>{ stageOfClass[c.id] = c.stageId; });
+  return Object.entries((DB.settings || {}).lessons || {}).map(([k, l])=>{
+    const i = k.lastIndexOf('|'); return {date:k.slice(0,i), stageId:k.slice(i+1), ...l};
+  }).filter(l=>l.title && l.date >= from && l.date <= to && (!stageId || l.stageId === stageId)).map(l=>{
+    const recs = DB.attendance.filter(a=>a.date === l.date && stageOfClass[a.classId] === l.stageId);
+    return {...l, total: recs.length, pct: recs.length ? Math.round(recs.filter(a=>a.present).length / recs.length * 100) : null};
+  }).sort((a,b)=> a.date < b.date ? -1 : a.date > b.date ? 1 : String(a.stageId).localeCompare(String(b.stageId)));
+};
+Reports.lessons = function(noScroll){
+  const fEl = document.getElementById('les-from'), tEl = document.getElementById('les-to'), sEl = document.getElementById('les-stage');
+  let [from, to] = Reports.annualRange('school0'), stageId = '';
+  if(fEl && tEl && fEl.value && tEl.value){ from = fEl.value; to = tEl.value; stageId = sEl ? sEl.value : ''; }
+  if(from > to){ const t = from; from = to; to = t; }
+  const rows = Reports.lessonRows(from, to, stageId);
+  document.getElementById('report-output').innerHTML = `
+    <div class="card card-pad">
+      <div class="section-head no-print"><h2>📖 جدول المنهج</h2><div class="toolbar">
+        <select id="les-stage" onchange="Reports.lessons(true)"><option value="">كل المراحل</option>${DB.stages.map(st=>`<option value="${st.id}" ${st.id===stageId?'selected':''}>${esc(st.name)}</option>`).join('')}</select>
+        <input type="date" id="les-from" value="${from}" onchange="Reports.lessons(true)"><span class="muted">إلى</span><input type="date" id="les-to" value="${to}" onchange="Reports.lessons(true)">
+        <button class="btn btn-primary btn-sm" onclick="Lessons.openForm('${todayISO()}','${stageId}')">＋ درس جديد</button>
+        <button class="btn btn-gold btn-sm" onclick="window.print()">طباعة / حفظ PDF</button></div></div>
+      <div style="text-align:center; margin:10px 0;"><b>جدول المنهج</b> — ${esc((DB.settings||{}).churchName||'')}<br><span class="muted">${fmtDate(from)} إلى ${fmtDate(to)}</span></div>
+      <table><thead><tr><th>التاريخ</th><th>المرحلة</th><th>الدرس</th><th>الآية / الحفظ</th><th>الحضور</th><th class="no-print"></th></tr></thead><tbody>
+        ${rows.length ? rows.map(l=>`<tr><td>${fmtDate(l.date)}</td><td>${esc(nameOf(DB.stages,l.stageId))}</td><td>${esc(l.title)}${l.notes ? `<div class="muted" style="font-size:12px;">${esc(l.notes)}</div>` : ''}</td><td class="muted">${esc(l.verse||'—')}</td><td>${l.pct === null ? '—' : l.pct + '%'}</td>
+          <td class="no-print"><button class="btn btn-ghost btn-sm" onclick="Lessons.openForm('${l.date}','${l.stageId}')">تعديل</button></td></tr>`).join('') : `<tr><td colspan="6" class="muted">مفيش دروس متسجّلة في الفترة دي. سجّل الدرس من صفحة الحضور أو زر "＋ درس جديد".</td></tr>`}
+      </tbody></table>
+    </div>`;
+  const out = document.getElementById('report-output'); if(!noScroll && out.scrollIntoView) out.scrollIntoView({behavior:'smooth', block:'start'});
+};
+
+/* ---------- فحص جودة البيانات ----------
+   بيفحص المخدومين النشطين (مفيش هاتف/هاتف غلط/ميلاد ناقص أو غير منطقي/فصل ناقص أو مش متسق/كود ناقص أو مكرر/اسم مكرر) والخدام النشطين،
+   وبيعرض كل مشكلة مع زر تعديل مباشر (بعد الحفظ نفضل في التقرير وبيتعاد الفحص). مابيغيّرش أي بيانات بنفسه. */
+const DataQuality = {};
+/* '' = سليم · 'missing' = فاضي · 'invalid' = شكله غلط. بيقبل موبايل مصري (010/011/012/015) بأي صيغة (+20 / 0020 / من غير صفر)، وأرضي، وأرقام دولية بـ + */
+DataQuality.phoneIssue = function(p){
+  const raw = String(p||'').trim();
+  if(!raw) return 'missing';
+  let d = raw.replace(/[^\d]/g,'');
+  if(!d) return 'invalid';
+  if(d.startsWith('0020')) d = d.slice(2);
+  if(d.startsWith('20') && d.length >= 12) d = '0' + d.slice(2);
+  if(/^01[0125]\d{8}$/.test(d)) return '';
+  if(/^1[0125]\d{8}$/.test(d)) return '';          // موبايل من غير الصفر الأول (شائع في ملفات Excel)
+  if(/^0[2-9]\d{7,8}$/.test(d)) return '';          // أرضي
+  if(raw.startsWith('+') && !raw.startsWith('+20') && d.length >= 8 && d.length <= 15) return '';   // دولي
+  return 'invalid';
+};
+DataQuality.compute = function(){
+  const norm = v => String(v||'').trim().toLowerCase();
+  const classById = {}; DB.classes.forEach(c=>{ classById[c.id] = c; });
+  const active = DB.members.filter(m=>m.status !== 'inactive');
+  const codes = {}; active.forEach(m=>{ const c = norm(m.code); if(c) codes[c] = (codes[c]||0) + 1; });
+  const cats = {dupCode:[], noClass:[], noPhone:[], badPhone:[], noBirth:[], badBirth:[], classMismatch:[], noCode:[]};
+  const flagged = new Set();
+  const push = (k, m, detail) => { cats[k].push({m, detail:detail||''}); flagged.add(m.id); };
+  active.forEach(m=>{
+    const p1 = DataQuality.phoneIssue(m.phone), p2 = DataQuality.phoneIssue(m.guardianPhone);
+    if(p1 === 'missing' && p2 === 'missing') push('noPhone', m);
+    const bad = [p1 === 'invalid' ? 'هاتف المخدوم: ' + m.phone : '', p2 === 'invalid' ? 'هاتف ولي الأمر: ' + m.guardianPhone : ''].filter(Boolean);
+    if(bad.length) push('badPhone', m, bad.join(' — '));
+    if(!m.birthDate) push('noBirth', m);
+    else { const b = new Date(m.birthDate), a = age(m.birthDate); if(isNaN(b) || b > new Date() || (typeof a === 'number' && a > 60)) push('badBirth', m, isNaN(b) ? String(m.birthDate) : fmtDate(m.birthDate)); }
+    if(!m.classId) push('noClass', m, 'من غير فصل');
+    else if(!classById[m.classId]) push('noClass', m, 'الفصل المسجّل اتحذف');
+    else { const c = classById[m.classId]; if((m.gradeId && c.gradeId && m.gradeId !== c.gradeId) || (m.stageId && c.stageId && m.stageId !== c.stageId)) push('classMismatch', m, 'الفصل: ' + c.name); }
+    if(!norm(m.code)) push('noCode', m);
+    else if(codes[norm(m.code)] > 1) push('dupCode', m, 'الكود: ' + m.code);
+  });
+  // أسماء مكررة (بعد توحيد الهمزات والمسافات)
+  const byName = {};
+  active.forEach(m=>{ const k = normalizeArabic(m.name).replace(/\s+/g,' ').toLowerCase(); if(k) (byName[k] = byName[k] || []).push(m); });
+  const dupNames = Object.values(byName).filter(g=>g.length > 1);
+  dupNames.forEach(g=>g.forEach(m=>flagged.add(m.id)));
+  // الخدام
+  const svActive = DB.servants.filter(x=>x.status !== 'inactive');
+  const svCodes = {}; svActive.forEach(x=>{ const c = norm(x.code); if(c) svCodes[c] = (svCodes[c]||0) + 1; });
+  const sv = {noPhone:[], badPhone:[], noClass:[], dupCode:[]};
+  svActive.forEach(x=>{
+    const p = DataQuality.phoneIssue(x.phone);
+    if(p === 'missing') sv.noPhone.push({m:x, detail:''}); else if(p === 'invalid') sv.badPhone.push({m:x, detail:'الهاتف: ' + x.phone});
+    if(!x.classId) sv.noClass.push({m:x, detail:'من غير فصل'}); else if(!classById[x.classId]) sv.noClass.push({m:x, detail:'الفصل المسجّل اتحذف'});
+    if(norm(x.code) && svCodes[norm(x.code)] > 1) sv.dupCode.push({m:x, detail:'الكود: ' + x.code});
+  });
+  const memberIssues = Object.values(cats).reduce((n,l)=>n + l.length, 0) + dupNames.length;
+  const servantIssues = Object.values(sv).reduce((n,l)=>n + l.length, 0);
+  return { activeCount: active.length, cats, dupNames, sv, memberIssues, servantIssues, totalIssues: memberIssues + servantIssues,
+    completePct: active.length ? Math.round((active.length - flagged.size) / active.length * 100) : 100 };
+};
+/* إعادة الفحص بعد تعديل/حذف: مرة فورًا ومرة بعد لحظة (عشان تحديث Firestore اللحظي يكون وصل)، من غير ما نسحب المستخدم لأول التقرير */
+DataQuality.refresh = function(){
+  const go = ()=>{ if(CURRENT_PAGE === 'reports' && document.getElementById('report-output')) Reports.dataQuality(true); };
+  go(); setTimeout(go, 400);
+};
+DataQuality.edit = function(id){ Members.openForm(id); Members._afterSave = DataQuality.refresh; };
+DataQuality.editServant = function(id){ Servants.openForm(id); Servants._afterSave = DataQuality.refresh; };
+DataQuality.remove = function(id){ Members._afterSave = DataQuality.refresh; Members.remove(id); };
+DataQuality.dashboardHint = function(){
+  if(!CURRENT_USER || !(CURRENT_USER.role === 'admin' || IMPERSONATING) || DB.members.length < 3) return '';
+  const r = DataQuality.compute();
+  if(!r.totalIssues) return '';
+  return `<div class="card card-pad no-print" style="margin-bottom:14px; display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
+    <span>🧹 اكتمال ملفات المخدومين <b>${r.completePct}%</b> — فيه <b>${r.totalIssues}</b> ملاحظة تستاهل تتصلّح.</span>
+    <button class="btn btn-ghost btn-sm" onclick="App.navigate('reports'); Reports.dataQuality();">افتح الفحص</button></div>`;
+};
+Reports.dataQuality = function(noScroll){
+  const R = DataQuality.compute();
+  const LABELS = {
+    dupCode:['♊','كود مكرر','بيبوّظ مسح الباركود'], noClass:['🏫','من غير فصل صالح','مش هيظهر في تسجيل الحضور'],
+    noPhone:['📵','من غير أي رقم هاتف','لا للمخدوم ولا لولي الأمر — مهم للتواصل والافتقاد'], badPhone:['⚠️','رقم هاتف شكله غير صحيح','المفروض 11 رقم يبدأ بـ 010/011/012/015'],
+    noBirth:['🎂','من غير تاريخ ميلاد','عشان الأعمار وتهنئة أعياد الميلاد'], badBirth:['📅','تاريخ ميلاد غير منطقي','تاريخ مستقبلي أو عمر أكبر من 60'],
+    classMismatch:['🔀','الفصل مش تابع للمرحلة/الصف المسجّل','راجع المرحلة والصف والفصل'], noCode:['🏷️','من غير كود','الكود بيتستخدم في الباركود'],
+  };
+  const byName = (a,b) => String(a.m.name).localeCompare(String(b.m.name), 'ar');
+  const rowsTable = (list, editFn, showClass) => `<table><tbody>${[...list].sort(byName).map(x=>`<tr><td>${esc(x.m.name)}</td>${showClass ? `<td class="muted">${esc(nameOf(DB.classes, x.m.classId))}</td>` : ''}<td class="muted">${esc(x.detail)}</td><td class="no-print" style="width:1%; white-space:nowrap;"><button class="btn btn-ghost btn-sm" onclick="${editFn}('${x.m.id}')">تعديل</button></td></tr>`).join('')}</tbody></table>`;
+  const section = (key, list, editFn, showClass, labels) => list.length ? `<details class="ann-sec ann-long" ${list.length <= 8 ? 'open' : ''} style="margin-top:14px; break-inside:auto;">
+      <summary style="cursor:pointer; font-weight:700;">${labels[0]} ${labels[1]} <span class="pill pill-absent">${list.length}</span> <span class="muted" style="font-weight:400; font-size:12.5px;">— ${labels[2]}</span></summary>
+      <div style="margin-top:8px;">${rowsTable(list, editFn, showClass)}</div></details>` : '';
+  const dupNamesHtml = R.dupNames.length ? `<details class="ann-sec ann-long" open style="margin-top:14px; break-inside:auto;">
+      <summary style="cursor:pointer; font-weight:700;">👯 أسماء مكررة <span class="pill pill-absent">${R.dupNames.length}</span> <span class="muted" style="font-weight:400; font-size:12.5px;">— ممكن يكون نفس الشخص اتسجّل مرتين (أو إخوة بنفس الاسم). احذف السجل الأقل بيانات (بيروح لسلة المحذوفات ويتسترجع خلال 30 يوم)</span></summary>
+      ${R.dupNames.map(g=>`<div class="card card-pad" style="margin-top:8px;"><b>${esc(g[0].name)}</b> — ${g.length} سجلات
+        <table><tbody>${g.map(m=>{ const att = DB.attendance.filter(a=>a.memberId===m.id).length, ev = DB.evaluations.filter(e=>e.memberId===m.id).length, fu = DB.followups.filter(f=>f.memberId===m.id).length;
+          return `<tr><td class="muted">${esc(m.code||'—')}</td><td>${esc(nameOf(DB.classes,m.classId))}</td><td class="muted">${esc(m.phone||m.guardianPhone||'—')}</td><td class="muted">${m.birthDate ? fmtDate(m.birthDate) : '—'}</td>
+          <td class="muted">حضور ${att} · تقييم ${ev} · متابعة ${fu}</td>
+          <td class="no-print" style="white-space:nowrap;"><button class="btn btn-ghost btn-sm" onclick="DataQuality.edit('${m.id}')">تعديل</button> <button class="btn btn-danger btn-sm" onclick="DataQuality.remove('${m.id}')">حذف</button></td></tr>`; }).join('')}</tbody></table></div>`).join('')}</details>` : '';
+  const svLabels = { noPhone:['📵','خادم من غير رقم هاتف','' ], badPhone:['⚠️','خادم رقم هاتفه شكله غير صحيح',''], noClass:['🏫','خادم من غير فصل صالح','مهم لربطه بفصله وتقييد الخادم بفصله'], dupCode:['♊','كود خادم مكرر',''] };
+  const order = ['dupCode','noClass','noPhone','badPhone','noBirth','badBirth','classMismatch','noCode'];
+  const body = `
+    <style>.ann-title{text-align:center; margin-bottom:14px;} .ann-title h1{font-size:22px; margin:0 0 4px;} .ann-title p{margin:2px 0; color:var(--ink-soft);}</style>
+    <div class="ann-title"><h1>🧹 فحص جودة البيانات</h1><p>${esc((DB.settings||{}).churchName||'')}</p></div>
+    <div class="stat-grid">
+      ${statCard('اكتمال ملفات المخدومين', R.completePct + '%', R.completePct >= 90 ? 'good' : 'accent')}
+      ${statCard('المخدومون النشطون اللي اتفحصوا', R.activeCount, '')}
+      ${statCard('ملاحظات على المخدومين', R.memberIssues, R.memberIssues ? 'accent' : 'good')}
+      ${statCard('ملاحظات على الخدام', R.servantIssues, R.servantIssues ? 'accent' : 'good')}
+    </div>
+    ${R.totalIssues === 0 ? `<div class="card card-pad" style="margin-top:14px;">✔ بياناتك مكتملة ومفيش ملاحظات 🎉</div>` : ''}
+    ${order.map(k=>section(k, R.cats[k], 'DataQuality.edit', true, LABELS[k])).join('')}
+    ${dupNamesHtml}
+    ${['dupCode','noClass','noPhone','badPhone'].map(k=>section('sv'+k, R.sv[k], 'DataQuality.editServant', false, svLabels[k])).join('')}
+    <p class="muted" style="margin-top:16px; font-size:12.5px;">الفحص بيشمل المخدومين والخدام النشطين بس، ومابيغيّرش أي بيانات بنفسه.</p>`;
+  document.getElementById('report-output').innerHTML = `
+    <div class="card card-pad">
+      <div class="section-head no-print" style="justify-content:flex-end;"><div class="toolbar"><button class="btn btn-ghost btn-sm" onclick="Reports.dataQuality()">🔄 إعادة الفحص</button><button class="btn btn-gold btn-sm" onclick="window.print()">طباعة / حفظ PDF</button></div></div>
+      ${body}
+    </div>`;
+  const out = document.getElementById('report-output'); if(!noScroll && out.scrollIntoView) out.scrollIntoView({behavior:'smooth', block:'start'});
+};
+
 /* ---------- التقرير السنوي ---------- */
 /* الفترات الجاهزة: العام الدراسي بيبدأ 1 سبتمبر وينتهي 31 أغسطس. النصوص YYYY-MM-DD (من غير Date عشان مايحصلش لخبطة مناطق زمنية) */
 Reports.annualRange = function(preset){
@@ -4434,6 +4870,8 @@ Reports.annualData = function(from, to){
     activeMembers: DB.members.filter(m=>m.status!=='inactive').length, newMembers,
     servants: DB.servants.filter(s=>s.status!=='inactive').length,
     months, byClass, top, low, evalCount: evs.length, evalAvg: allCnt ? (allSum/allCnt).toFixed(1) : '—', criteria,
+    lessons: Reports.lessonRows(from, to, ''),
+    actFin: acts.reduce((o, a)=>{ const f = actFinance(a); o.collected += f.collected; o.expected += f.expected; o.expenses += f.expenses; o.any = o.any || f.hasFinance; return o; }, {collected:0, expected:0, expenses:0, any:false}),
     fupCount: fups.length, fupOpen: fups.filter(fupIsOpen).length, fupTypes, acts, actParticipations: acts.reduce((a,x)=>a+(x.participants||[]).length,0),
     bestMonth: withData.length ? withData.reduce((a,b)=>b.pct>a.pct?b:a) : null,
     worstMonth: withData.length > 1 ? withData.reduce((a,b)=>b.pct<a.pct?b:a) : null,
@@ -4535,10 +4973,16 @@ Reports.annual = function(preset){
     </div></div>
 
     <div class="ann-sec ann-long" style="break-after:avoid;"><h3>🎉 الأنشطة (${D.acts.length}) — إجمالي المشاركات: ${D.actParticipations}</h3>
-      <table>${th(['التاريخ','النشاط','المكان','المشاركون'])}<tbody>
-        ${D.acts.length ? D.acts.map(a=>`<tr><td>${fmtDate(a.date)}</td><td>${esc(a.name)}</td><td>${esc(a.place||'—')}</td><td>${(a.participants||[]).length}</td></tr>`).join('') : empty(4,'لا توجد أنشطة في الفترة.')}
+      ${D.actFin.any ? `<p style="margin:0 0 8px;">إجمالي المحصّل: <b>${fmtMoney(D.actFin.collected)}</b> · المصروفات: <b>${fmtMoney(D.actFin.expenses)}</b> · الصافي: <b>${fmtMoney(D.actFin.collected - D.actFin.expenses)}</b></p>` : ''}
+      <table>${th(['التاريخ','النشاط','المكان','المشاركون', ...(D.actFin.any ? ['المحصّل','المصروفات'] : [])])}<tbody>
+        ${D.acts.length ? D.acts.map(a=>{ const f = actFinance(a); return `<tr><td>${fmtDate(a.date)}</td><td>${esc(a.name)}</td><td>${esc(a.place||'—')}</td><td>${(a.participants||[]).length}</td>${D.actFin.any ? `<td>${f.hasFinance ? fmtNum(f.collected) : '—'}</td><td>${f.hasFinance ? fmtNum(f.expenses) : '—'}</td>` : ''}</tr>`; }).join('') : empty(D.actFin.any ? 6 : 4,'لا توجد أنشطة في الفترة.')}
       </tbody></table>
     </div>
+
+    ${D.lessons.length ? `<div class="ann-sec ann-long"><h3>📖 المنهج (${D.lessons.length} درس)</h3>
+      <table>${th(['التاريخ','المرحلة','الدرس','الآية / الحفظ','الحضور'])}<tbody>
+        ${D.lessons.map(l=>`<tr><td>${fmtDate(l.date)}</td><td>${esc(nameOf(DB.stages,l.stageId))}</td><td>${esc(l.title)}</td><td class="muted">${esc(l.verse||'—')}</td><td>${l.pct === null ? '—' : l.pct + '%'}</td></tr>`).join('')}
+      </tbody></table></div>` : ''}
 
     <div class="ann-sign"><div>أمين الخدمة</div><div>الاعتماد</div></div>
     <p class="muted" style="margin-top:14px; font-size:12px;">تم إنشاء التقرير بتاريخ ${fmtDate(todayISO())}${CURRENT_USER ? ' بواسطة ' + esc(CURRENT_USER.name) : ''}.</p>
@@ -4563,8 +5007,8 @@ Views.users = function(){
     <div class="card"><div id="users-table-wrap"></div></div>
   `;
   const uRows = DB.users;
-  document.getElementById('users-table-wrap').innerHTML = uRows.length ? `<table><thead><tr><th>الاسم</th><th>البريد الإلكتروني</th><th>الدور</th><th></th></tr></thead>
-    <tbody>${uRows.map(u=>`<tr><td class="name-cell"><span class="avatar">${u.photo?`<img src="${u.photo}" data-photo="${u.photo}" onclick="previewAvatarClick(event)" style="cursor:zoom-in;">`:initials(u.name)}</span>${esc(u.name)}</td><td class="muted">${esc(u.email)}</td><td>${ROLE_LABELS[u.role]||u.role}</td>
+  document.getElementById('users-table-wrap').innerHTML = uRows.length ? `<table><thead><tr><th>الاسم</th><th>البريد الإلكتروني</th><th>الدور</th><th>الخادم المرتبط</th><th></th></tr></thead>
+    <tbody>${uRows.map(u=>`<tr><td class="name-cell"><span class="avatar">${u.photo?`<img src="${u.photo}" data-photo="${u.photo}" onclick="previewAvatarClick(event)" style="cursor:zoom-in;">`:initials(u.name)}</span>${esc(u.name)}</td><td class="muted">${esc(u.email)}</td><td>${ROLE_LABELS[u.role]||u.role}</td><td>${u.servantId && byId(DB.servants,u.servantId) ? esc(byId(DB.servants,u.servantId).name) : '<span class="muted">—</span>'}</td>
       <td><div class="row-actions"><button class="btn btn-ghost btn-sm" onclick="UsersV.openForm('${u.id}')">تعديل الدور</button>${u.id!==CURRENT_USER.uid?`<button class="btn btn-danger btn-sm" onclick="UsersV.remove('${u.id}')">حذف</button>`:''}</div></td>
     </tr>`).join('')}</tbody></table>` : `<div class="empty-state">لا يوجد مستخدمون بعد</div>`;
 
@@ -4632,6 +5076,8 @@ UsersV.openForm = function(id){
         <option value="servant" ${u.role==='servant'?'selected':''}>خادم</option>
         <option value="staff" ${u.role==='staff'?'selected':''}>مستخدم إداري</option>
       </select></div>
+      <div class="field full"><label>سجل الخادم المرتبط بالحساب (بيتستخدم في "مهامي" وتقييد الخادم بفصله)</label>
+        <select id="f-servant-link"><option value="">— غير مرتبط —</option>${DB.servants.map(sv=>`<option value="${sv.id}" ${u.servantId===sv.id?'selected':''}>${esc(sv.name)}${sv.classId?' — '+esc(nameOf(DB.classes,sv.classId)):''}</option>`).join('')}</select></div>
     </div>
   `, `<button class="btn btn-primary" onclick="UsersV.save('${id}')">حفظ</button><button class="btn btn-ghost" onclick="UI.closeModal()">إلغاء</button>`);
 };
@@ -4639,8 +5085,9 @@ UsersV.save = async function(id){
   const role = document.getElementById('f-role').value;
   const photo = document.getElementById('f-photo-data').value;
   const code = document.getElementById('f-code').value.trim();
+  const servantId = document.getElementById('f-servant-link').value;
   try{
-    await fsUpdate('users', id, {role, photo, code});
+    await fsUpdate('users', id, {role, photo, code, servantId});
     await log('تعديل دور مستخدم', byId(DB.users,id)?.name||'');
     UI.closeModal(); toast('تم الحفظ بنجاح'); App.navigate('users');
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
@@ -4672,6 +5119,8 @@ Views.settings = function(){
       </div>
       <button class="btn btn-primary" style="margin-top:14px;" onclick="SettingsV.save()">حفظ الإعدادات</button>
     </div>
+
+    ${Scope.settingsCardHtml()}
 
     <div class="section-head" style="margin-top:26px;"><h2>💬 قوالب رسائل واتساب</h2></div>
     <div class="card card-pad" style="max-width:760px; margin-bottom:10px;">
@@ -4742,6 +5191,16 @@ SettingsV.save = async function(){
     await log('تعديل الإعدادات','');
     toast('تم حفظ الإعدادات');
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
+};
+SettingsV.setRestrictServants = async function(checked){
+  const cb = document.getElementById('set-restrict');
+  const unlinked = (DB.users||[]).filter(u=>u.role === 'servant' && (!u.servantId || !byId(DB.servants,u.servantId)));
+  if(checked && unlinked.length && !confirm(`فيه ${unlinked.length} حساب خادم مش مربوط بسجل خادم (${unlinked.map(u=>u.name).join('، ')}). هيشوفوا صفحات فاضية لحد ما تربطهم. تشغّل التقييد برضه؟`)){ if(cb) cb.checked = false; return; }
+  try{
+    await fsSet('settings', CURRENT_CHURCH_ID, {restrictServants: !!checked});
+    await log(checked ? 'تشغيل تقييد الخادم بفصله' : 'إيقاف تقييد الخادم بفصله','');
+    toast(checked ? 'تم تشغيل تقييد الخادم بفصله' : 'تم إيقاف التقييد');
+  }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); if(cb) cb.checked = !checked; }
 };
 SettingsV.resetWaTemplate = function(key){
   const def = WA_TEMPLATES.find(t=>t.key===key); const ta = document.getElementById('wa-set-'+key);
@@ -5443,4 +5902,4 @@ window.App = App; window.UI = UI; window.Members = Members; window.Servants = Se
 window.Stages = Stages; window.Attendance = Attendance; window.Evaluations = Evaluations;
 window.Followups = Followups; window.Activities = Activities; window.Reports = Reports;
 window.UsersV = UsersV; window.SettingsV = SettingsV; window.BackupV = BackupV; window.TrashV = TrashV;
-window.WA = WA; window.Onboarding = Onboarding;
+window.WA = WA; window.Onboarding = Onboarding; window.DataQuality = DataQuality; window.Lessons = Lessons;
