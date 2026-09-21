@@ -4011,6 +4011,7 @@ Views.reports = function(){
   $content().innerHTML = `
     <div class="section-head no-print"><h2>مركز التقارير</h2></div>
     <div class="info-card-grid no-print">
+      ${reportCard('📘 التقرير السنوي','تقرير شامل قابل للطباعة للعام الدراسي: الحضور شهريًا، المراحل والفصول، الملتزمون، التقييمات، الأنشطة، المتابعة.','Reports.annual(\'school0\')')}
       ${reportCard('كشف جميع المخدومين','قائمة كاملة ببيانات المخدومين مع المرحلة والفصل والحالة.','Reports.membersList()')}
       ${reportCard('كشف حضور خلال فترة','تقرير حضور وغياب تفصيلي حسب المرحلة/الفصل وفترة زمنية.','Reports.attendanceRange()')}
       ${reportCard('كشف حضور فردي','تقرير حضور وغياب مخدوم واحد بعينه خلال فترة محددة.','Reports.individualAttendance()')}
@@ -4138,6 +4139,193 @@ Reports.activitiesReport = function(){
     <table><thead><tr><th>النشاط</th><th>التاريخ</th><th>المكان</th><th>عدد المشاركين</th></tr></thead>
     <tbody>${DB.activities.map(a=>`<tr><td>${esc(a.name)}</td><td>${fmtDate(a.date)}</td><td>${esc(a.place)}</td><td>${(a.participants||[]).length}</td></tr>`).join('')}</tbody></table>
   `);
+};
+
+/* ---------- التقرير السنوي ---------- */
+/* الفترات الجاهزة: العام الدراسي بيبدأ 1 سبتمبر وينتهي 31 أغسطس. النصوص YYYY-MM-DD (من غير Date عشان مايحصلش لخبطة مناطق زمنية) */
+Reports.annualRange = function(preset){
+  const now = new Date();
+  const y = now.getMonth() >= 8 ? now.getFullYear() : now.getFullYear() - 1;   // سنة بداية العام الدراسي الحالي
+  if(preset === 'school-1') return [`${y-1}-09-01`, `${y}-08-31`];
+  if(preset === 'cal0') return [`${now.getFullYear()}-01-01`, `${now.getFullYear()}-12-31`];
+  return [`${y}-09-01`, `${y+1}-08-31`];   // school0
+};
+Reports.annualLabel = function(preset, from, to){
+  if(preset === 'school0' || preset === 'school-1') return 'العام الدراسي ' + from.slice(0,4) + '/' + to.slice(0,4);
+  return 'من ' + fmtDate(from) + ' إلى ' + fmtDate(to);
+};
+/* حساب كل أرقام التقرير من بيانات الكنيسة (دالة صافية — بتاخد from/to وبترجّع كائن، من غير أي رسم) */
+Reports.annualData = function(from, to){
+  const d10 = v => String(v||'').slice(0,10);
+  const inR = v => { const x = d10(v); return !!x && x >= from && x <= to; };
+  const pct = (a,b) => b ? Math.round(a/b*100) : 0;
+  const att = DB.attendance.filter(a=>inR(a.date));
+  const present = att.filter(a=>a.present).length;
+  const sessionDates = [...new Set(att.map(a=>d10(a.date)))].sort();
+
+  // الشهور من from لـ to (بحساب أرقام صحيحة مش Date)
+  let [fy, fm] = from.split('-').map(Number); const [ty, tm] = to.split('-').map(Number);
+  const months = [];
+  while(fy < ty || (fy === ty && fm <= tm)){
+    const key = fy + '-' + String(fm).padStart(2,'0');
+    const recs = att.filter(a=>d10(a.date).slice(0,7) === key);
+    const p = recs.filter(a=>a.present).length;
+    months.push({ key, label: new Date(fy, fm-1, 15).toLocaleDateString('ar-EG',{month:'long', year:'numeric'}),
+      short: new Date(fy, fm-1, 15).toLocaleDateString('ar-EG',{month:'short'}),
+      sessions: new Set(recs.map(a=>d10(a.date))).size, present: p, absent: recs.length - p, total: recs.length, pct: pct(p, recs.length) });
+    if(++fm > 12){ fm = 1; fy++; }
+    if(months.length > 60) break;
+  }
+
+  // حسب الفصل
+  const byClass = DB.classes.map(c=>{
+    const recs = att.filter(a=>a.classId === c.id); const p = recs.filter(a=>a.present).length;
+    return { stage: nameOf(DB.stages, c.stageId), name: c.name, members: DB.members.filter(m=>m.classId===c.id && m.status!=='inactive').length,
+      sessions: new Set(recs.map(a=>d10(a.date))).size, total: recs.length, pct: pct(p, recs.length), hasData: recs.length>0 };
+  }).filter(r=>r.members>0 || r.hasData).sort((a,b)=> a.stage.localeCompare(b.stage,'ar') || a.name.localeCompare(b.name,'ar'));
+
+  // الملتزمون / الأقل حضورًا (بشرط 3 سجلات على الأقل عشان النسبة تبقى ذات معنى)
+  const per = {};
+  att.forEach(a=>{ const p = per[a.memberId] || (per[a.memberId] = {present:0,total:0}); p.total++; if(a.present) p.present++; });
+  const list = Object.keys(per).map(id=>{ const m = byId(DB.members,id); return m ? {id, name:m.name, cls:nameOf(DB.classes,m.classId), ...per[id], pct: pct(per[id].present, per[id].total)} : null; })
+    .filter(x=>x && x.total >= 3);
+  const top = [...list].sort((a,b)=> b.pct-a.pct || b.present-a.present).slice(0,10);
+  const low = [...list].filter(x=>x.pct < 75).sort((a,b)=> a.pct-b.pct || b.total-a.total).slice(0,10);
+
+  // التقييمات
+  const evs = DB.evaluations.filter(e=>inR(e.date));
+  const crit = {}; let allSum = 0, allCnt = 0;
+  evs.forEach(e=>Object.entries(e.scores||{}).forEach(([k,v])=>{ const n = Number(v); if(isNaN(n)) return; const c = crit[k] || (crit[k]={sum:0,cnt:0}); c.sum+=n; c.cnt++; allSum+=n; allCnt++; }));
+  const criteria = Object.keys(crit).map(k=>({name:k, avg:(crit[k].sum/crit[k].cnt).toFixed(1), cnt:crit[k].cnt})).sort((a,b)=>b.avg-a.avg);
+
+  // المتابعة والأنشطة
+  const fups = DB.followups.filter(f=>inR(f.date)); const fupTypes = {};
+  fups.forEach(f=>{ const t = f.type || 'غير محدد'; fupTypes[t] = (fupTypes[t]||0)+1; });
+  const acts = DB.activities.filter(a=>inR(a.date)).sort((a,b)=>d10(a.date).localeCompare(d10(b.date)));
+
+  const newMembers = DB.members.filter(m=>{ if(!m.createdAt) return false; const c = new Date(m.createdAt); return !isNaN(c) && inR(c.getFullYear()+'-'+String(c.getMonth()+1).padStart(2,'0')+'-'+String(c.getDate()).padStart(2,'0')); }).length;
+  const withData = months.filter(m=>m.total>0);
+  return {
+    from, to, attTotal: att.length, present, absent: att.length - present, pct: pct(present, att.length),
+    sessions: sessionDates.length, avgPerSession: sessionDates.length ? Math.round(present / sessionDates.length) : 0,
+    activeMembers: DB.members.filter(m=>m.status!=='inactive').length, newMembers,
+    servants: DB.servants.filter(s=>s.status!=='inactive').length,
+    months, byClass, top, low, evalCount: evs.length, evalAvg: allCnt ? (allSum/allCnt).toFixed(1) : '—', criteria,
+    fupCount: fups.length, fupTypes, acts, actParticipations: acts.reduce((a,x)=>a+(x.participants||[]).length,0),
+    bestMonth: withData.length ? withData.reduce((a,b)=>b.pct>a.pct?b:a) : null,
+    worstMonth: withData.length > 1 ? withData.reduce((a,b)=>b.pct<a.pct?b:a) : null,
+  };
+};
+/* رسم أعمدة نسبة الحضور الشهرية (SVG مباشر: بيتطبع صح من غير "Background graphics"، والشهور من اليمين لليسار) */
+Reports._annualChart = function(months){
+  const W = 640, H = 210, padT = 22, padB = 30, plotH = H - padT - padB;
+  const step = W / Math.max(months.length, 1), bw = Math.min(step * 0.6, 46);
+  const bars = months.map((m,i)=>{
+    const cx = W - (i + 0.5) * step, h = m.total ? Math.max(2, plotH * m.pct / 100) : 0, y = padT + plotH - h;
+    return (m.total
+      ? `<rect x="${(cx-bw/2).toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" rx="3" style="fill:var(--navy);"/><text x="${cx.toFixed(1)}" y="${(y-5).toFixed(1)}" text-anchor="middle" font-size="11" style="fill:var(--ink);">${m.pct}%</text>`
+      : `<text x="${cx.toFixed(1)}" y="${(padT+plotH-4).toFixed(1)}" text-anchor="middle" font-size="11" style="fill:var(--ink-soft);">—</text>`)
+      + `<text x="${cx.toFixed(1)}" y="${H-10}" text-anchor="middle" font-size="11" style="fill:var(--ink-soft);">${esc(m.short)}</text>`;
+  }).join('');
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W}px; display:block; margin:0 auto;" role="img" aria-label="نسبة الحضور الشهرية">
+    <line x1="0" y1="${padT+plotH}" x2="${W}" y2="${padT+plotH}" style="stroke:var(--line);" stroke-width="1"/>${bars}</svg>`;
+};
+Reports.annual = function(preset){
+  const fEl = document.getElementById('ann-from'), tEl = document.getElementById('ann-to');
+  let from, to;
+  if(preset && preset !== 'custom'){ [from, to] = Reports.annualRange(preset); }
+  else if(fEl && tEl && fEl.value && tEl.value){ from = fEl.value; to = tEl.value; preset = 'custom'; }
+  else { [from, to] = Reports.annualRange('school0'); preset = 'school0'; }
+  if(from > to){ const t = from; from = to; to = t; }
+  const D = Reports.annualData(from, to);
+  const S = DB.settings || {};
+  const label = Reports.annualLabel(preset, from, to);
+  const sel = v => preset === v ? 'selected' : '';
+  const controls = `<select id="ann-preset" onchange="Reports.annual(this.value)">
+      <option value="school0" ${sel('school0')}>العام الدراسي الحالي</option><option value="school-1" ${sel('school-1')}>العام الدراسي اللي فات</option>
+      <option value="cal0" ${sel('cal0')}>السنة الميلادية الحالية</option><option value="custom" ${sel('custom')}>فترة مخصصة</option></select>
+    <input type="date" id="ann-from" value="${from}" onchange="Reports.annual('custom')"><span class="muted">إلى</span><input type="date" id="ann-to" value="${to}" onchange="Reports.annual('custom')">`;
+  const summary = D.attTotal
+    ? `على مدار <b>${D.sessions}</b> اجتماع، بلغت نسبة الحضور العامة <b>${D.pct}%</b> بمتوسط <b>${D.avgPerSession}</b> حاضر في الاجتماع.`
+      + (D.bestMonth ? ` أعلى شهر حضورًا: <b>${esc(D.bestMonth.label)}</b> (${D.bestMonth.pct}%).` : '')
+      + (D.worstMonth ? ` وأقل شهر: <b>${esc(D.worstMonth.label)}</b> (${D.worstMonth.pct}%).` : '')
+    : 'مفيش بيانات حضور مسجّلة في الفترة دي.';
+  const th = h => `<thead><tr>${h.map(x=>`<th>${x}</th>`).join('')}</tr></thead>`;
+  const empty = (n, t) => `<tr><td colspan="${n}" class="muted">${t}</td></tr>`;
+  const body = `
+    <style>
+      .ann-sec{margin-top:22px; break-inside:avoid;} .ann-sec tr{break-inside:avoid;} .ann-sec h3{break-after:avoid;} .ann-sec.ann-long{break-inside:auto;}
+      .ann-sec h3{font-size:15px; margin:0 0 10px; padding-bottom:6px; border-bottom:2px solid var(--line);}
+      .ann-title{text-align:center; margin-bottom:18px;} .ann-title h1{font-size:22px; margin:0 0 4px;} .ann-title p{margin:2px 0; color:var(--ink-soft);}
+      .ann-two{display:grid; grid-template-columns:1fr 1fr; gap:16px;}
+      .ann-summary{background:var(--paper-2); border:1px solid var(--line); border-radius:10px; padding:12px 16px; line-height:1.9;}
+      .ann-sign{display:none; justify-content:space-between; margin-top:30px; break-inside:avoid;} .ann-sign div{width:40%; text-align:center; border-top:1px solid var(--ink-soft); padding-top:6px; color:var(--ink-soft);}
+      @media print{ .ann-sign{display:flex;} .ann-two{grid-template-columns:1fr 1fr;} }
+    </style>
+    <div class="ann-title">
+      <h1>التقرير السنوي</h1>
+      <p>${esc(S.churchName||'')}${S.schoolName ? ' — ' + esc(S.schoolName) : ''}</p>
+      <p><b>${esc(label)}</b></p>
+    </div>
+    <div class="stat-grid">
+      ${statCard('المخدومون النشطون (حاليًا)', D.activeMembers, '')}
+      ${statCard('مخدومون جدد في الفترة', D.newMembers, 'accent')}
+      ${statCard('عدد الاجتماعات', D.sessions, '')}
+      ${statCard('متوسط الحضور في الاجتماع', D.avgPerSession, '')}
+      ${statCard('نسبة الحضور العامة', D.pct + '%', 'good')}
+      ${statCard('الخدام', D.servants, '')}
+      ${statCard('الأنشطة', D.acts.length, '')}
+      ${statCard('سجلات المتابعة', D.fupCount, '')}
+    </div>
+    <div class="ann-summary">${summary}</div>
+
+    <div class="ann-sec ann-long"><h3>الحضور شهريًا</h3>
+      <div style="break-inside:avoid;">${D.attTotal ? Reports._annualChart(D.months) : ''}</div>
+      <table style="margin-top:12px;">${th(['الشهر','الاجتماعات','حضور','غياب','النسبة'])}<tbody>
+        ${D.months.map(m=>`<tr><td>${esc(m.label)}</td><td>${m.sessions}</td><td>${m.present}</td><td>${m.absent}</td><td>${m.total ? m.pct + '%' : '—'}</td></tr>`).join('')}
+        <tr style="font-weight:800; background:var(--paper);"><td>الإجمالي</td><td>${D.sessions}</td><td>${D.present}</td><td>${D.absent}</td><td>${D.attTotal ? D.pct + '%' : '—'}</td></tr>
+      </tbody></table>
+    </div>
+
+    <div class="ann-sec ann-long"><h3>الحضور حسب الفصول</h3>
+      <table>${th(['المرحلة','الفصل','عدد المخدومين','الاجتماعات','النسبة'])}<tbody>
+        ${D.byClass.length ? D.byClass.map(r=>`<tr><td>${esc(r.stage)}</td><td>${esc(r.name)}</td><td>${r.members}</td><td>${r.sessions}</td><td>${r.total ? r.pct + '%' : '—'}</td></tr>`).join('') : empty(5,'لا توجد فصول.')}
+      </tbody></table>
+    </div>
+
+    <div class="ann-sec"><div class="ann-two">
+      <div><h3>🏅 الأكثر التزامًا بالحضور</h3><table>${th(['المخدوم','الفصل','النسبة'])}<tbody>
+        ${D.top.length ? D.top.map(x=>`<tr><td>${esc(x.name)}</td><td>${esc(x.cls)}</td><td>${x.pct}% <span class="muted">(${x.present}/${x.total})</span></td></tr>`).join('') : empty(3,'مفيش بيانات كافية (3 سجلات حضور على الأقل).')}
+      </tbody></table></div>
+      <div><h3>🔎 الأقل حضورًا (محتاجين افتقاد)</h3><table>${th(['المخدوم','الفصل','النسبة'])}<tbody>
+        ${D.low.length ? D.low.map(x=>`<tr><td>${esc(x.name)}</td><td>${esc(x.cls)}</td><td>${x.pct}% <span class="muted">(${x.present}/${x.total})</span></td></tr>`).join('') : empty(3,'مفيش مخدومين تحت 75% 🎉')}
+      </tbody></table></div>
+    </div></div>
+
+    <div class="ann-sec"><div class="ann-two">
+      <div><h3>⭐ التقييمات</h3>
+        <p style="margin:0 0 8px;">عدد التقييمات: <b>${D.evalCount}</b> · المتوسط العام: <b>${D.evalAvg}</b></p>
+        <table>${th(['المعيار','المتوسط'])}<tbody>${D.criteria.length ? D.criteria.map(c=>`<tr><td>${esc(c.name)}</td><td>${c.avg}</td></tr>`).join('') : empty(2,'لا توجد تقييمات في الفترة.')}</tbody></table></div>
+      <div><h3>🗂️ المتابعة الفردية</h3>
+        <p style="margin:0 0 8px;">إجمالي سجلات المتابعة: <b>${D.fupCount}</b></p>
+        <table>${th(['النوع','العدد'])}<tbody>${Object.keys(D.fupTypes).length ? Object.entries(D.fupTypes).sort((a,b)=>b[1]-a[1]).map(([t,n])=>`<tr><td>${esc(t)}</td><td>${n}</td></tr>`).join('') : empty(2,'لا توجد سجلات متابعة في الفترة.')}</tbody></table></div>
+    </div></div>
+
+    <div class="ann-sec ann-long" style="break-after:avoid;"><h3>🎉 الأنشطة (${D.acts.length}) — إجمالي المشاركات: ${D.actParticipations}</h3>
+      <table>${th(['التاريخ','النشاط','المكان','المشاركون'])}<tbody>
+        ${D.acts.length ? D.acts.map(a=>`<tr><td>${fmtDate(a.date)}</td><td>${esc(a.name)}</td><td>${esc(a.place||'—')}</td><td>${(a.participants||[]).length}</td></tr>`).join('') : empty(4,'لا توجد أنشطة في الفترة.')}
+      </tbody></table>
+    </div>
+
+    <div class="ann-sign"><div>أمين الخدمة</div><div>الاعتماد</div></div>
+    <p class="muted" style="margin-top:14px; font-size:12px;">تم إنشاء التقرير بتاريخ ${fmtDate(todayISO())}${CURRENT_USER ? ' بواسطة ' + esc(CURRENT_USER.name) : ''}.</p>
+  `;
+  document.getElementById('report-output').innerHTML = `
+    <div class="card card-pad">
+      <div class="section-head no-print" style="justify-content:flex-end;"><div class="toolbar">${controls}<button class="btn btn-gold btn-sm" onclick="window.print()">طباعة / حفظ PDF</button></div></div>
+      ${body}
+    </div>`;
+  const out = document.getElementById('report-output'); if(out && out.scrollIntoView) out.scrollIntoView({behavior:'smooth', block:'start'});
 };
 
 /* ---------- Users & permissions ---------- */
