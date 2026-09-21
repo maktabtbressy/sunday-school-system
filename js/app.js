@@ -2601,7 +2601,8 @@ Views.dashboard = function(){
       <div class="card card-pad">
         <div class="section-head"><h2>🎂 أعياد الميلاد القادمة (٧ أيام)</h2></div>
         ${upcomingBirthdays.length ? `<table><tbody>${upcomingBirthdays.map(m=>`
-          <tr><td>${esc(m.name)}</td><td class="muted">${fmtDate(m.nextBirthday)}</td></tr>
+          <tr><td>${esc(m.name)}</td><td class="muted">${m.daysUntil===0?'النهاردة 🎉':fmtDate(m.nextBirthday)}</td>
+          <td>${(m.phone||m.guardianPhone)? `<button class="btn btn-ghost btn-sm" title="تهنئة واتساب" onclick="WA.openModal('${m.id}','birthday')">💬</button>` : ''}</td></tr>
         `).join('')}</tbody></table>` : `<p class="muted">مفيش أعياد ميلاد فى الأسبوع الجاي.</p>`}
       </div>
       <div class="card card-pad">
@@ -2610,7 +2611,7 @@ Views.dashboard = function(){
           <tr><td class="name-cell"><span class="avatar">${initials(m.name)}</span><span class="nm" onclick="App.navigate('memberProfile','${m.id}')">${esc(m.name)}</span></td>
           <td class="muted">${esc(nameOf(D.classes,m.classId))}</td>
           <td><span class="pill pill-absent">${m.reason}</span></td>
-          <td>${(m.phone||m.guardianPhone)? `<a href="${waLink(m.phone||m.guardianPhone, 'سلام ونعمة، حابين نطمّن على '+m.name+' لأننا لاحظنا غيابه عن مدرسة الأحد 🙏')}" target="_blank" class="btn btn-ghost btn-sm" title="تواصل واتساب">💬</a>` : ''}</td></tr>`).join('')}</tbody></table>`
+          <td>${(m.phone||m.guardianPhone)? `<button class="btn btn-ghost btn-sm" title="رسالة افتقاد واتساب" onclick="WA.openModal('${m.id}','absence')">💬</button>` : ''}</td></tr>`).join('')}</tbody></table>`
           : `<p class="muted">لا يوجد حاليًا مخدومون بحاجة لمتابعة عاجلة 🎉</p>`}
       </div>
       <div class="card card-pad">
@@ -2972,7 +2973,7 @@ Views.members = function(){
       {h:'الفصل', render:m=>esc(nameOf(DB.classes,m.classId))},
       {h:'الهاتف', key:'phone'},
       {h:'الحالة', render:m=>statusPill(m.status)},
-      {h:'', render:m=>`<div class="row-actions"><button class="btn btn-ghost btn-sm" onclick="Members.openForm('${m.id}')">تعديل</button><button class="btn btn-danger btn-sm" onclick="Members.remove('${m.id}')">حذف</button></div>`},
+      {h:'', render:m=>`<div class="row-actions">${(m.phone||m.guardianPhone)?`<button class="btn btn-ghost btn-sm" title="رسالة واتساب" onclick="WA.openModal('${m.id}')">💬</button>`:''}<button class="btn btn-ghost btn-sm" onclick="Members.openForm('${m.id}')">تعديل</button><button class="btn btn-danger btn-sm" onclick="Members.remove('${m.id}')">حذف</button></div>`},
     ]
   });
 };
@@ -3066,6 +3067,7 @@ Views.memberProfile = function(id){
           <div class="muted">${esc(nameOf(DB.stages,m.stageId))} — ${esc(nameOf(DB.grades,m.gradeId))} — ${esc(nameOf(DB.classes,m.classId))} · ${esc(m.gender||'')} · السن ${age(m.birthDate)} · ${statusPill(m.status)}</div>
         </div>
         <button class="btn btn-ghost btn-sm no-print" onclick="Members.openForm('${m.id}')">تعديل البيانات</button>
+        <button class="btn btn-ghost btn-sm no-print" onclick="WA.openModal('${m.id}')">💬 واتساب</button>
         <button class="btn btn-gold btn-sm no-print" onclick="Members.printCard('${m.id}')">🎫 طباعة بطاقة</button>
         <button class="btn btn-ghost btn-sm no-print" onclick="Members.printCertificate('${m.id}')">📜 طباعة شهادة</button>
       </div>
@@ -3419,6 +3421,98 @@ function waLink(phone, message){
   else if(!p.startsWith('20') && p.length===10) p = '20'+p; // احتياط لأرقام من غير الصفر الأول
   return 'https://wa.me/'+p+(message? '?text='+encodeURIComponent(message) : '');
 }
+/* ---------- قوالب رسائل واتساب ----------
+   المتغيرات ({الاسم} ...) بتتبدّل تلقائيًا ببيانات المخدوم. {ه} = "ه" للذكر و"ها" للأنثى (عشان الصياغة تطلع سليمة).
+   القوالب المعدّلة بتتخزن في settings/{الكنيسة}.waTemplates (ونسخة الإعدادات الاحتياطية بتشملها)، والفاضي = الافتراضي. */
+const WA_TEMPLATES = [
+  {key:'birthday', ic:'🎂', label:'تهنئة عيد ميلاد', text:'🎂 كل سنة و{الاسم} طيب وبخير! ربنا يبارك في عمر{ه} ويفرّح قلب{ه} دايمًا. من كل خدام {الكنيسة} 🙏'},
+  {key:'absence',  ic:'🔎', label:'افتقاد (غياب)', text:'سلام ونعمة 🙏 حابين نطمّن على {الاسم} لأننا لاحظنا غياب{ه} عن {المدرسة}. نتمنى نشوف{ه} قريب، وربنا يحفظ{ه}.'},
+  {key:'reminder', ic:'⏰', label:'تذكير بالاجتماع', text:'سلام ونعمة 🙏 تذكير بميعاد {المدرسة} يوم {الأحد_القادم} في {الكنيسة}. مستنيين {الاسم} معانا 💛'},
+  {key:'welcome',  ic:'👋', label:'ترحيب بمخدوم جديد', text:'أهلاً وسهلاً بـ{الاسم} في {المدرسة} — {الكنيسة} 🙏 فرحانين بانضمام{ه} لينا، وفصل{ه} هو {الفصل}. ربنا يبارك.'},
+  {key:'thanks',   ic:'🌟', label:'شكر وتشجيع', text:'سلام ونعمة 🙏 شكرًا على انتظام {الاسم} في {المدرسة} 🌟 ربنا يبارك في{ه} ويثبّت{ه} في طريق النمو.'},
+  {key:'custom',   ic:'✏️', label:'رسالة مفتوحة', text:'سلام ونعمة يا {الاسم} 🙏\n'},
+];
+const WA_PLACEHOLDERS = [
+  ['{الاسم}','الاسم الأول'], ['{الاسم_بالكامل}','الاسم بالكامل'], ['{ه}','"ه" للذكر و"ها" للأنثى'],
+  ['{الفصل}','الفصل'], ['{الصف}','الصف'], ['{المرحلة}','المرحلة'], ['{الكنيسة}','اسم الكنيسة'], ['{المدرسة}','اسم المدرسة'],
+  ['{التاريخ}','تاريخ النهاردة'], ['{الأحد_القادم}','تاريخ الأحد الجاي'], ['{الخادم}','اسمك'],
+];
+function _waDateLabel(d){ return d.toLocaleDateString('ar-EG',{weekday:'long', day:'numeric', month:'long'}); }
+const WA = {_mid:null};
+WA.getTemplate = function(key){
+  const def = WA_TEMPLATES.find(t=>t.key===key);
+  const custom = ((DB.settings && DB.settings.waTemplates) || {})[key];
+  return (typeof custom==='string' && custom.trim()) ? custom : (def ? def.text : '');
+};
+WA.fill = function(text, m){
+  const cls = byId(DB.classes, m.classId), grade = byId(DB.grades, m.gradeId), stage = byId(DB.stages, m.stageId);
+  const s = DB.settings || {};
+  const full = String(m.name||'').trim();
+  const today = new Date();
+  const sunday = new Date(); sunday.setDate(sunday.getDate() + ((7 - sunday.getDay()) % 7 || 7));
+  const vars = {
+    'الاسم': full.split(/\s+/)[0] || full, 'الاسم_بالكامل': full,
+    'ه': m.gender==='أنثى' ? 'ها' : 'ه',
+    'الفصل': cls?cls.name:'', 'الصف': grade?grade.name:'', 'المرحلة': stage?stage.name:'',
+    'الكنيسة': s.churchName || (CURRENT_CHURCH && CURRENT_CHURCH.name) || 'الكنيسة',
+    'المدرسة': s.schoolName || 'مدرسة الأحد',
+    'التاريخ': _waDateLabel(today), 'الأحد_القادم': _waDateLabel(sunday),
+    'الخادم': CURRENT_USER ? CURRENT_USER.name : '',
+  };
+  return String(text||'').replace(/\{([^{}]+)\}/g, (all,k)=>{ k=k.trim(); return Object.prototype.hasOwnProperty.call(vars,k) ? vars[k] : all; });
+};
+/* أرقام الاستلام المتاحة: المخدوم نفسه ثم ولي الأمر */
+WA.recipients = function(m){
+  const out = [];
+  if(m.phone && String(m.phone).replace(/\D/g,'')) out.push({label:'المخدوم — '+m.phone, phone:m.phone});
+  if(m.guardianPhone && String(m.guardianPhone).replace(/\D/g,'')) out.push({label:'ولي الأمر'+(m.guardianName?' ('+m.guardianName+')':'')+' — '+m.guardianPhone, phone:m.guardianPhone});
+  return out;
+};
+WA.openModal = function(memberId, key){
+  const m = byId(DB.members, memberId);
+  if(!m){ toast('المخدوم مش موجود'); return; }
+  WA._mid = memberId;
+  const recips = WA.recipients(m);
+  if(!recips.length){
+    UI.openModal('💬 رسالة واتساب — '+m.name,
+      `<p>مفيش رقم هاتف مسجّل للمخدوم ده ولا لولي أمره. أضف الرقم من "تعديل البيانات" وبعدين ارجع.</p>`,
+      `<button class="btn btn-primary" onclick="Members.openForm('${m.id}')">تعديل البيانات</button><button class="btn btn-ghost" onclick="UI.closeModal()">إغلاق</button>`);
+    return;
+  }
+  const tplKey = WA_TEMPLATES.some(t=>t.key===key) ? key : 'custom';
+  UI.openModal('💬 رسالة واتساب — '+m.name, `
+    <div class="form-grid">
+      <div class="field full"><label>المُرسَل إليه</label><select id="wa-to">${recips.map(r=>`<option value="${esc(r.phone)}">${esc(r.label)}</option>`).join('')}</select></div>
+      <div class="field full"><label>نوع الرسالة</label><select id="wa-tpl" onchange="WA.pick(this.value)">${WA_TEMPLATES.map(t=>`<option value="${t.key}" ${t.key===tplKey?'selected':''}>${t.ic} ${esc(t.label)}</option>`).join('')}</select></div>
+      <div class="field full"><label>نص الرسالة (تقدر تعدّله قبل الإرسال)</label><textarea id="wa-text" rows="6"></textarea></div>
+    </div>
+    <p class="muted" style="margin:0;">هيتفتح واتساب برسالة جاهزة، وانت اللي بتضغط "إرسال" هناك.</p>
+  `, `<button class="btn btn-primary" onclick="WA.send()">💬 فتح واتساب</button><button class="btn btn-ghost" onclick="WA.copy()">📋 نسخ النص</button><button class="btn btn-ghost" onclick="UI.closeModal()">إغلاق</button>`);
+  WA.pick(tplKey);
+};
+WA.pick = function(key){
+  const m = byId(DB.members, WA._mid); if(!m) return;
+  const ta = document.getElementById('wa-text'); if(!ta) return;
+  ta.value = WA.fill(WA.getTemplate(key), m);
+};
+WA.send = function(){
+  const m = byId(DB.members, WA._mid); if(!m) return;
+  const phone = document.getElementById('wa-to').value;
+  const text = document.getElementById('wa-text').value.trim();
+  if(!text){ toast('اكتب نص الرسالة الأول'); return; }
+  const url = waLink(phone, text);
+  if(!url){ toast('رقم الهاتف غير صالح'); return; }
+  const win = window.open(url, '_blank');
+  if(!win){ toast('برجاء السماح بفتح نوافذ منبثقة عشان يتفتح واتساب'); return; }
+  const tpl = WA_TEMPLATES.find(t=>t.key===document.getElementById('wa-tpl').value);
+  log('فتح رسالة واتساب', m.name+' — '+(tpl?tpl.label:''));
+  UI.closeModal();
+};
+WA.copy = async function(){
+  const ta = document.getElementById('wa-text'); if(!ta) return;
+  try{ await navigator.clipboard.writeText(ta.value); toast('تم نسخ النص'); }
+  catch(_){ ta.select(); try{ document.execCommand('copy'); toast('تم نسخ النص'); }catch(e){ toast('تعذر النسخ'); } }
+};
 function normalizeArabic(s){
   return String(s||'').replace(/[أإآ]/g,'ا').replace(/ى/g,'ي').replace(/ة/g,'ه').trim();
 }
@@ -4168,6 +4262,18 @@ Views.settings = function(){
       <button class="btn btn-primary" style="margin-top:14px;" onclick="SettingsV.save()">حفظ الإعدادات</button>
     </div>
 
+    <div class="section-head" style="margin-top:26px;"><h2>💬 قوالب رسائل واتساب</h2></div>
+    <div class="card card-pad" style="max-width:760px; margin-bottom:10px;">
+      <p class="muted" style="margin:0 0 6px;">عدّل صياغة الرسائل الجاهزة اللي بتظهر عند الضغط على 💬 جنب المخدوم. الكلمات بين الأقواس بتتبدّل تلقائيًا ببيانات المخدوم:</p>
+      <p style="margin:0 0 14px; line-height:2;">${WA_PLACEHOLDERS.map(p=>`<span class="pill status-pending" title="${esc(p[1])}" style="margin-left:4px;">${esc(p[0])}</span>`).join('')}</p>
+      ${WA_TEMPLATES.map(t=>`
+        <div class="field full" style="margin-bottom:12px;">
+          <label>${t.ic} ${esc(t.label)} <a style="cursor:pointer; font-size:12px; margin-right:8px; color:var(--absent);" onclick="SettingsV.resetWaTemplate('${t.key}')">استرجاع الافتراضي</a></label>
+          <textarea id="wa-set-${t.key}" rows="3">${esc(WA.getTemplate(t.key))}</textarea>
+        </div>`).join('')}
+      <button class="btn btn-primary" onclick="SettingsV.saveWaTemplates()">حفظ القوالب</button>
+    </div>
+
     <div class="section-head" style="margin-top:26px;"><h2>📋 قوائم المهام (أسماء الأنشطة وأنواع المتابعة)</h2></div>
     <div class="info-card-grid" style="margin-bottom:10px;">
       <div class="card card-pad">
@@ -4224,6 +4330,22 @@ SettingsV.save = async function(){
     document.getElementById('church-name-label').textContent = data.churchName || 'إدارة مدارس الأحد';
     await log('تعديل الإعدادات','');
     toast('تم حفظ الإعدادات');
+  }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
+};
+SettingsV.resetWaTemplate = function(key){
+  const def = WA_TEMPLATES.find(t=>t.key===key); const ta = document.getElementById('wa-set-'+key);
+  if(def && ta){ ta.value = def.text; toast('اتسترجع النص الافتراضي — اضغط "حفظ القوالب" لتأكيده'); }
+};
+SettingsV.saveWaTemplates = async function(){
+  const data = {};
+  WA_TEMPLATES.forEach(t=>{
+    const v = (document.getElementById('wa-set-'+t.key)||{value:''}).value;
+    data[t.key] = (v.trim() && v !== t.text) ? v : ''; // الفاضي أو المطابق للافتراضي = افتراضي
+  });
+  try{
+    await fsSet('settings', CURRENT_CHURCH_ID, {waTemplates: data});
+    await log('تعديل قوالب واتساب','');
+    toast('تم حفظ قوالب واتساب');
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
 };
 SettingsV.addListItem = async function(field, inputId){
@@ -4898,3 +5020,4 @@ window.App = App; window.UI = UI; window.Members = Members; window.Servants = Se
 window.Stages = Stages; window.Attendance = Attendance; window.Evaluations = Evaluations;
 window.Followups = Followups; window.Activities = Activities; window.Reports = Reports;
 window.UsersV = UsersV; window.SettingsV = SettingsV; window.BackupV = BackupV; window.TrashV = TrashV;
+window.WA = WA;
