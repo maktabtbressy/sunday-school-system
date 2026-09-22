@@ -4,7 +4,7 @@
    ========================================================= */
 
 /* رقم إصدار التطبيق: بيظهر أسفل القائمة الجانبية عشان تتأكد إنك رافع آخر نسخة. بيتزوّد مع كل تسليم جديد. */
-const APP_VERSION = '1.1 — رسوم الأنشطة';
+const APP_VERSION = '1.2 — وضع الاستقبال';
 let DB = {settings:{schoolName:'مدرسة الأحد'}, stages:[], grades:[], classes:[], members:[], servants:[],
   attendance:[], evaluations:[], followups:[], activities:[], auditLog:[], users:[],
   paymentMethods:[], paymentProofs:[], chatMessages:[], tickets:[], plans:[]}; // ذاكرة مؤقتة تُزامَن تلقائيًا مع Firestore
@@ -3909,6 +3909,7 @@ Attendance.render = function(){
           <button class="btn btn-ghost btn-sm" onclick="Attendance.copyLast()">📋 نسخ حضور آخر مرة</button>
           <button class="btn btn-ghost btn-sm" onclick="Attendance.markAll(true)">تحديد الكل حاضر</button>
           <button class="btn btn-ghost btn-sm" onclick="Attendance.showAbsentees(false)">📲 افتقاد الغائبين</button>
+          <button class="btn btn-gold btn-sm" onclick="Reception.open()">🖥️ وضع الاستقبال</button>
           <button class="btn btn-ghost btn-sm" onclick="Attendance.printRoster('${classId}','${date}')">🖨 طباعة كشف الفصل</button>
           <button class="btn btn-primary btn-sm" onclick="Attendance.saveAll()">حفظ الحضور</button>
         </div>
@@ -4060,6 +4061,164 @@ Attendance.addTask = function(mid){
   const date = (document.getElementById('att-date')||{}).value || todayISO();
   const due = new Date(Date.now() + 3*86400000).toISOString().slice(0,10);
   Followups.openForm(null, mid, {status:'open', type:'غياب', subject:'غياب '+fmtDate(date), nextDate:due, stay:true});
+};
+/* ---------- وضع الاستقبال (Reception Kiosk) ----------
+   شاشة تسجيل حضور سريعة عند الباب: قارئ باركود USB (يشتغل كلوحة مفاتيح) كوضع افتراضي، مع خيار كاميرا الموبايل.
+   بتحترم تقييد الخادم بفصله تلقائيًا لأنها بتدوّر في DB.members المفلترة أصلًا زي Attendance.scanCode بالظبط.
+   العنصر بيتبني ديناميكيًا ويتلحق بالـ body (من غير أي تعديل في index.html)، ومفيش تعديل في القواعد أو شكل بيانات الحضور. */
+const Reception = {};
+Reception._seen = new Set();
+Reception._cooldown = {};
+Reception._audioCtx = null;
+Reception._wakeLock = null;
+Reception._raf = null;
+Reception._stream = null;
+Reception.open = function(){
+  if(document.getElementById('reception-overlay')) return;
+  stopScannerIfActive(); UI.closeModal();
+  Reception._seen = new Set(); Reception._cooldown = {};
+  document.body.insertAdjacentHTML('beforeend', `
+    <style>
+      #reception-overlay{position:fixed; inset:0; z-index:600; background:var(--navy); color:#fff; display:flex; flex-direction:column; direction:rtl;}
+      #reception-overlay .rc-top{display:flex; align-items:center; justify-content:space-between; gap:10px; padding:12px 16px; flex-wrap:wrap; border-bottom:1px solid rgba(255,255,255,.15);}
+      #reception-overlay .rc-top input[type=date]{background:rgba(255,255,255,.1); border:1px solid rgba(255,255,255,.3); color:#fff; border-radius:8px; padding:6px 8px;}
+      #reception-overlay .rc-count{font-size:15px; font-weight:700;}
+      #reception-overlay .rc-close{background:rgba(255,255,255,.12); border:none; color:#fff; width:38px; height:38px; border-radius:50%; font-size:18px; cursor:pointer;}
+      #reception-overlay .rc-body{flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:20px; gap:18px; text-align:center;}
+      #reception-overlay .rc-hint{opacity:.75; font-size:13px;}
+      #reception-overlay #rc-input{width:min(360px,90vw); font-size:22px; text-align:center; padding:14px; border-radius:12px; border:2px solid var(--gold); background:rgba(255,255,255,.08); color:#fff;}
+      #reception-overlay #rc-input:focus{outline:none; border-color:#fff;}
+      #reception-overlay video{width:min(420px,92vw); border-radius:14px; background:#000;}
+      #reception-overlay .rc-card{width:min(420px,92vw); border-radius:18px; padding:22px; background:rgba(255,255,255,.06); border:2px solid rgba(255,255,255,.15); min-height:150px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px; transition:border-color .2s, background .2s;}
+      #reception-overlay .rc-card.ok{border-color:var(--present); background:rgba(60,150,90,.18);}
+      #reception-overlay .rc-card.info{border-color:#8ab4e8; background:rgba(80,120,190,.18);}
+      #reception-overlay .rc-card.err{border-color:var(--absent); background:rgba(190,70,70,.18);}
+      #reception-overlay .rc-avatar{width:64px; height:64px; border-radius:50%; overflow:hidden; background:rgba(255,255,255,.15); display:flex; align-items:center; justify-content:center; font-size:26px; font-weight:700;}
+      #reception-overlay .rc-avatar img{width:100%; height:100%; object-fit:cover;}
+      #reception-overlay .rc-name{font-size:24px; font-weight:800;}
+      #reception-overlay .rc-sub{opacity:.85; font-size:14px;}
+      #reception-overlay .rc-status{font-size:15px; font-weight:700;}
+      #reception-overlay .rc-tabs{display:flex; gap:8px;}
+      #reception-overlay .rc-tab{padding:6px 14px; border-radius:99px; border:1px solid rgba(255,255,255,.3); background:transparent; color:#fff; cursor:pointer; font-size:13px;}
+      #reception-overlay .rc-tab.active{background:var(--gold); border-color:var(--gold); color:#1a1a1a; font-weight:700;}
+    </style>
+    <div id="reception-overlay">
+      <div class="rc-top">
+        <button class="rc-close" onclick="Reception.close()" title="إغلاق">✕</button>
+        <div class="rc-tabs"><button class="rc-tab active" id="rc-tab-manual" onclick="Reception.setMode('manual')">⌨️ قارئ باركود</button><button class="rc-tab" id="rc-tab-camera" onclick="Reception.setMode('camera')">📷 كاميرا الموبايل</button></div>
+        <div style="display:flex; align-items:center; gap:8px;"><input type="date" id="rc-date" value="${todayISO()}"><span class="rc-count">✅ <span id="rc-count-num">0</span> اتسجّلوا</span></div>
+      </div>
+      <div class="rc-body">
+        <div id="rc-cam-wrap" style="display:none;"><video id="rc-video" playsinline muted autoplay></video><canvas id="rc-canvas" style="display:none;"></canvas></div>
+        <input type="text" id="rc-input" placeholder="امسح الكود..." autocomplete="off">
+        <p class="rc-hint" id="rc-hint">وجّه القارئ نحو كود المخدوم — الخانة هتفضل جاهزة تلقائيًا</p>
+        <div class="rc-card" id="rc-card">
+          <div class="rc-avatar" id="rc-avatar">🎫</div>
+          <div class="rc-name" id="rc-name">جاهز لاستقبال أول مخدوم</div>
+          <div class="rc-sub" id="rc-sub"></div>
+          <div class="rc-status" id="rc-status"></div>
+        </div>
+      </div>
+    </div>`);
+  const input = document.getElementById('rc-input');
+  input.addEventListener('keydown', e=>{ if(e.key === 'Enter'){ e.preventDefault(); Reception._submit(input.value); } });
+  document.addEventListener('keydown', Reception._onEsc);
+  Reception._refocus();
+  Reception._blurTimer = setInterval(Reception._refocus, 700);   // يرجّع التركيز للخانة لو المستخدم دبّس في حتة تانية بالغلط
+  if(navigator.wakeLock){ navigator.wakeLock.request('screen').then(l=>Reception._wakeLock = l).catch(()=>{}); }
+};
+Reception._onEsc = function(e){ if(e.key === 'Escape') Reception.close(); };
+Reception._refocus = function(){
+  const input = document.getElementById('rc-input');
+  if(input && Reception._mode !== 'camera' && document.activeElement !== input) input.focus();
+};
+Reception.close = function(){
+  clearInterval(Reception._blurTimer);
+  document.removeEventListener('keydown', Reception._onEsc);
+  Reception._stopCamera();
+  if(Reception._wakeLock){ Reception._wakeLock.release().catch(()=>{}); Reception._wakeLock = null; }
+  const el = document.getElementById('reception-overlay'); if(el) el.remove();
+};
+Reception.setMode = function(mode){
+  Reception._mode = mode;
+  document.getElementById('rc-tab-manual').classList.toggle('active', mode === 'manual');
+  document.getElementById('rc-tab-camera').classList.toggle('active', mode === 'camera');
+  document.getElementById('rc-cam-wrap').style.display = mode === 'camera' ? 'block' : 'none';
+  document.getElementById('rc-input').style.display = mode === 'camera' ? 'none' : 'block';
+  document.getElementById('rc-hint').textContent = mode === 'camera' ? 'وجّه الكاميرا نحو كود المخدوم' : 'وجّه القارئ نحو كود المخدوم — الخانة هتفضل جاهزة تلقائيًا';
+  if(mode === 'camera') Reception._startCamera(); else Reception._stopCamera();
+  if(mode === 'manual') Reception._refocus();
+};
+Reception._startCamera = async function(){
+  if(!window.jsQR){ document.getElementById('rc-hint').textContent = 'تعذر تحميل مكتبة قراءة الأكواد — تأكد من اتصال الإنترنت'; return; }
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}});
+    if(Reception._mode !== 'camera' || !document.getElementById('reception-overlay')){ stream.getTracks().forEach(t=>t.stop()); return; }
+    Reception._stream = stream;
+    const video = document.getElementById('rc-video'); video.srcObject = stream; await video.play();
+    Reception._camTick();
+  }catch(e){ document.getElementById('rc-hint').textContent = 'تعذر تشغيل الكاميرا: ' + e.message; }
+};
+Reception._stopCamera = function(){
+  if(Reception._raf) cancelAnimationFrame(Reception._raf); Reception._raf = null;
+  if(Reception._stream) Reception._stream.getTracks().forEach(t=>t.stop()); Reception._stream = null;
+};
+Reception._camTick = function(){
+  if(Reception._mode !== 'camera' || !document.getElementById('reception-overlay')) return;
+  const video = document.getElementById('rc-video'), canvas = document.getElementById('rc-canvas');
+  if(!video || !canvas || video.readyState !== video.HAVE_ENOUGH_DATA){ Reception._raf = requestAnimationFrame(Reception._camTick); return; }
+  canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+  const ctx = canvas.getContext('2d'); ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const code = jsQR(img.data, img.width, img.height);
+  if(code && code.data) Reception._submit(code.data);
+  Reception._raf = requestAnimationFrame(Reception._camTick);
+};
+Reception._submit = async function(raw){
+  const val = (raw || '').trim(); if(!val) return;
+  const now = Date.now();
+  if(Reception._cooldown[val] && now - Reception._cooldown[val] < 3000) { Reception._clearInput(); return; }   // نفس الكود في آخر 3 ثواني = تجاهل (مسح مزدوج)
+  Reception._cooldown[val] = now;
+  await Reception._handle(val);
+  Reception._clearInput();
+};
+Reception._clearInput = function(){ const i = document.getElementById('rc-input'); if(i) i.value = ''; };
+Reception._paint = function(status, member, msg){
+  const card = document.getElementById('rc-card'); if(!card) return;
+  card.className = 'rc-card ' + status;
+  document.getElementById('rc-avatar').innerHTML = member ? (member.photo ? `<img src="${member.photo}">` : esc(initials(member.name))) : (status === 'err' ? '⚠️' : '🎫');
+  document.getElementById('rc-name').textContent = member ? member.name : (status === 'err' ? 'كود غير معروف' : 'جاهز لاستقبال أول مخدوم');
+  document.getElementById('rc-sub').textContent = member ? nameOf(DB.classes, member.classId) : (msg && status === 'err' ? '' : '');
+  document.getElementById('rc-status').textContent = msg || '';
+};
+Reception._handle = async function(code){
+  const member = DB.members.find(m=>(m.code||'').trim() === code);
+  if(!member){ Reception._paint('err', null, '⚠️ الكود مش موجود: ' + code); Reception._beep(false); return; }
+  if(member.status === 'inactive'){ Reception._paint('err', member, '🚫 المخدوم غير نشط'); Reception._beep(false); return; }
+  if(!member.classId){ Reception._paint('err', member, '🚫 لسه مش متسجّل في فصل'); Reception._beep(false); return; }
+  const date = document.getElementById('rc-date').value || todayISO();
+  const already = DB.attendance.find(a=>a.date === date && a.memberId === member.id && a.classId === member.classId && a.present);
+  Reception._seen.add(member.id);
+  document.getElementById('rc-count-num').textContent = Reception._seen.size;
+  if(already){ Reception._paint('info', member, 'ℹ️ كان مسجّل حاضر بالفعل'); Reception._beep(true); return; }
+  try{
+    const rec = DB.attendance.find(a=>a.date === date && a.memberId === member.id && a.classId === member.classId);
+    if(rec) await fsUpdate('attendance', rec.id, {present:true}); else await fsAdd('attendance', {date, classId:member.classId, memberId:member.id, present:true});
+    Reception._paint('ok', member, '✅ تم تسجيل الحضور');
+    Reception._beep(true);
+    await log('تسجيل حضور — وضع الاستقبال', member.name);
+  }catch(e){ console.error(e); Reception._paint('err', member, '⚠️ تعذر الحفظ: ' + e.message); Reception._beep(false); }
+};
+/* صفارة قصيرة بـ Web Audio (من غير أي ملف صوت خارجي): نغمة صاعدة للنجاح، نغمة منخفضة للخطأ */
+Reception._beep = function(ok){
+  try{
+    if(!Reception._audioCtx) Reception._audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const ctx = Reception._audioCtx, o = ctx.createOscillator(), g = ctx.createGain();
+    o.connect(g); g.connect(ctx.destination);
+    o.frequency.value = ok ? 880 : 220; o.type = 'sine';
+    g.gain.setValueAtTime(0.15, ctx.currentTime); g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + (ok ? 0.18 : 0.3));
+    o.start(); o.stop(ctx.currentTime + (ok ? 0.2 : 0.32));
+  }catch(_){}
 };
 Attendance.saveAll = async function(){
   const classId = document.getElementById('att-class').value;
@@ -5902,4 +6061,4 @@ window.App = App; window.UI = UI; window.Members = Members; window.Servants = Se
 window.Stages = Stages; window.Attendance = Attendance; window.Evaluations = Evaluations;
 window.Followups = Followups; window.Activities = Activities; window.Reports = Reports;
 window.UsersV = UsersV; window.SettingsV = SettingsV; window.BackupV = BackupV; window.TrashV = TrashV;
-window.WA = WA; window.Onboarding = Onboarding; window.DataQuality = DataQuality; window.Lessons = Lessons;
+window.WA = WA; window.Onboarding = Onboarding; window.DataQuality = DataQuality; window.Lessons = Lessons; window.Reception = Reception;
