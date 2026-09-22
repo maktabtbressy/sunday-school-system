@@ -4,7 +4,7 @@
    ========================================================= */
 
 /* رقم إصدار التطبيق: بيظهر أسفل القائمة الجانبية عشان تتأكد إنك رافع آخر نسخة. بيتزوّد مع كل تسليم جديد. */
-const APP_VERSION = '1.2 — وضع الاستقبال';
+const APP_VERSION = '1.3 — تأكيد البريد وخروج تلقائي';
 let DB = {settings:{schoolName:'مدرسة الأحد'}, stages:[], grades:[], classes:[], members:[], servants:[],
   attendance:[], evaluations:[], followups:[], activities:[], auditLog:[], users:[],
   paymentMethods:[], paymentProofs:[], chatMessages:[], tickets:[], plans:[]}; // ذاكرة مؤقتة تُزامَن تلقائيًا مع Firestore
@@ -341,7 +341,7 @@ function codeFieldHtml(id, value, placeholder){
 import { firebaseConfig } from './firebase-config.js';
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.13.1/firebase-app.js';
 import {
-  getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, sendPasswordResetEmail, deleteUser,
+  getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, sendPasswordResetEmail, sendEmailVerification, deleteUser,
 } from 'https://www.gstatic.com/firebasejs/10.13.1/firebase-auth.js';
 import {
   getFirestore, collection, doc, addDoc, setDoc, updateDoc, deleteDoc,
@@ -359,6 +359,8 @@ let CURRENT_CHURCH_ID = null;
 let CHURCH_ACCESS_LOCKED = false; // true لو اشتراك الكنيسة منتهي — بيسمح بس بالفوترة/الدردشة/التذاكر
 const CHURCH_LOCKED_ALLOWED_PAGES = ['billing','chat','tickets'];
 let CURRENT_CHURCH = null;
+/* تأكيد البريد إلزامي بس للحسابات اللي اتعملت من التاريخ ده وبعده — الحسابات الأقدم (كل المستخدمين الحاليين) بتفضل شغالة عادي من غير أي خطوة إضافية. */
+const EMAIL_VERIFY_CUTOFF_MS = Date.parse('2026-09-22T00:00:00Z');
 let REGISTERING = false; // true أثناء تنفيذ عملية تسجيل كنيسة جديدة (لتجاهل onAuthStateChanged المؤقت)
 let HOLD_AUTH_SCREEN_UNTIL = 0; // لحظة تنتهي عندها "إمساك" شاشة الرسالة بعد signOut (انظر showPendingAndSignOut)
 
@@ -452,6 +454,7 @@ function attachListeners(onReady){
     DB.settings = d.exists() ? d.data() : {churchName: CURRENT_CHURCH?CURRENT_CHURCH.name:'', schoolName:'مدرسة الأحد', contact:CURRENT_CHURCH?CURRENT_CHURCH.contactPhone:''};
     document.getElementById('church-name-label').textContent = DB.settings.churchName || 'إدارة مدارس الأحد';
     Scope.apply();
+    IdleTimer.start();   // ممكن تتغيّر مدة الخمول وهو داخل
     tick();
   }, err=>console.error(err));
   unsubscribers.push(unsubSettings);
@@ -785,6 +788,7 @@ App.submitJoin = async function(){
       ...(inv.phone? {phone: inv.phone} : {}),
     });
     await updateDoc(doc(dbFire,'invites', email), {used:true});
+    if(!cred.user.emailVerified){ try{ await sendEmailVerification(cred.user); }catch(_){} }
     await signOut(auth);
     document.getElementById('join-screen').style.display='none';
     document.getElementById('pending-message').textContent = isNewAccount
@@ -874,6 +878,7 @@ App.submitRegister = async function(){
       name: adminName, email, role: 'admin', churchId: newChurchId,
     });
     await seedChurchDefaults(newChurchId, churchName);
+    try{ await sendEmailVerification(cred.user); }catch(_){}
     await signOut(auth);
     document.getElementById('register-screen').style.display='none';
     document.getElementById('pending-message').textContent = 'تم استلام طلب تسجيل كنيسة "'+churchName+'"، وهيتم تفعيل حسابك بمجرد الموافقة والتواصل معاك.';
@@ -887,11 +892,95 @@ App.submitRegister = async function(){
   }
 };
 
+/* ---------- تسجيل خروج تلقائي بعد خمول ---------- */
+/* settings.idleLogoutMinutes: 0/فاضي = متوقف (الافتراضي). أي رقم موجب = المدة بالدقايق.
+   بيتصفّر مع أي حركة فأرة/لمس/لوحة مفاتيح (قارئ الباركود USB بيبعت keydown فبيتصفّر لوحده)، وكمان يدويًا من وضع الاستقبال مع كل مسح. */
+const IdleTimer = {_t:null, _warnT:null, _lastPing:0};
+IdleTimer.minutes = function(){ return Number((DB.settings || {}).idleLogoutMinutes) || 0; };
+IdleTimer.stop = function(){ clearTimeout(IdleTimer._t); clearTimeout(IdleTimer._warnT); IdleTimer._t = null; IdleTimer._warnT = null; };
+IdleTimer.start = function(){
+  IdleTimer.stop();
+  const mins = IdleTimer.minutes();
+  if(!mins || !CURRENT_USER || document.getElementById('app').style.display === 'none') return;
+  const ms = mins * 60000;
+  if(ms > 60000) IdleTimer._warnT = setTimeout(()=>toast('⏳ هيتم تسجيل خروجك تلقائيًا بعد دقيقة من عدم النشاط'), ms - 60000);
+  IdleTimer._t = setTimeout(IdleTimer._trigger, ms);
+};
+IdleTimer.ping = function(){
+  const now = Date.now(); if(now - IdleTimer._lastPing < 2000) return;   // تقليل عدد المرات اللي بيعيد فيها ضبط المؤقّت
+  IdleTimer._lastPing = now; IdleTimer.start();
+};
+IdleTimer._trigger = function(){ signOutWithNotice('تم تسجيل خروجك تلقائيًا بسبب عدم النشاط. سجّل الدخول تاني للمتابعة.'); };
+['mousemove','keydown','click','touchstart','scroll'].forEach(evt=>document.addEventListener(evt, IdleTimer.ping, {passive:true}));
+
 App.logout = async function(){
+  IdleTimer.stop();
   await log('تسجيل خروج', CURRENT_USER?CURRENT_USER.name:'');
   await signOut(auth);
 };
 const ROLE_LABELS = {admin:'مدير النظام', servant:'خادم', staff:'مستخدم إداري', superadmin:'مالك النظام', subadmin:'أدمن فرعي'};
+
+/* إتمام الدخول العادي بعد كل الفحوصات (كنيسة نشطة + تأكيد البريد لو مطلوب). بتتنادى من المسار العادي وكمان بعد تأكيد البريد بنجاح (EmailVerify.recheck) من غير ما نعمل تسجيل دخول تاني. */
+function finishChurchLogin(){
+  hideAllAuthScreens();
+  document.getElementById('app').style.display='flex';
+  document.getElementById('current-user-name').textContent = CURRENT_USER.name;
+  document.getElementById('current-user-role').textContent = ROLE_LABELS[CURRENT_USER.role]||CURRENT_USER.role;
+  buildNav();
+  DB.users = [CURRENT_USER];
+  attachListeners(()=>{ App.navigate(CHURCH_ACCESS_LOCKED ? 'billing' : 'dashboard'); });
+  IdleTimer.start();
+  log('تسجيل دخول', CURRENT_USER.name);
+}
+/* ---------- بوابة تأكيد البريد الإلكتروني ---------- */
+const EmailVerify = {_lastSent:0};
+function showEmailVerifyGate(email){
+  hideAllAuthScreens();
+  if(!document.getElementById('email-verify-screen')){
+    document.body.insertAdjacentHTML('beforeend', `
+      <div id="email-verify-screen" style="display:flex; min-height:100vh; align-items:center; justify-content:center; flex-direction:column; text-align:center; background:var(--navy); color:#fff; padding:20px;">
+        <div style="font-size:52px; margin-bottom:14px;">📩</div>
+        <h1 style="font-size:22px; margin:0 0 10px;">أكّد بريدك الإلكتروني</h1>
+        <p style="opacity:.85; margin:0 0 6px; max-width:360px;">بعتنالك رابط تأكيد على <b id="ev-email"></b>. افتح بريدك واضغط على الرابط، وبعدين ارجع هنا.</p>
+        <p class="login-error" id="ev-error" style="display:none;"></p>
+        <div style="display:flex; gap:10px; margin-top:18px; flex-wrap:wrap; justify-content:center;">
+          <button class="btn btn-gold" onclick="EmailVerify.recheck()" id="ev-recheck-btn">✅ أكّدت البريد</button>
+          <button class="btn btn-ghost" style="border-color:rgba(255,255,255,.4); color:#fff;" onclick="EmailVerify.resend()" id="ev-resend-btn">✉️ إعادة إرسال الرابط</button>
+        </div>
+        <p class="auth-switch" style="margin-top:22px;"><a onclick="EmailVerify.logout()" style="color:#fff; text-decoration:underline;">تسجيل خروج</a></p>
+      </div>`);
+  }
+  document.getElementById('ev-email').textContent = email || '';
+  document.getElementById('email-verify-screen').style.display = 'flex';
+}
+EmailVerify.recheck = async function(){
+  const btn = document.getElementById('ev-recheck-btn'), err = document.getElementById('ev-error');
+  err.style.display = 'none'; btn.disabled = true; btn.textContent = 'جاري التأكد...';
+  try{
+    await auth.currentUser.reload();
+    if(auth.currentUser.emailVerified){
+      const el = document.getElementById('email-verify-screen'); if(el) el.remove();
+      let roleDoc = await getDoc(doc(dbFire,'users', auth.currentUser.uid));
+      if(!roleDoc.exists()){ await signOutWithNotice('تم حذف حسابك من النظام أو مش مربوط بأي كنيسة. تواصل مع مسؤول كنيستك.'); return; }
+      CURRENT_USER = {uid: auth.currentUser.uid, email: auth.currentUser.email, ...roleDoc.data()};
+      finishChurchLogin();
+    } else {
+      err.textContent = 'لسه ما اتأكدش. افتح بريدك واضغط على الرابط الأول، أو تأكد من مجلد الرسائل غير المرغوب فيها (Spam).';
+      err.style.display = 'block';
+    }
+  }catch(e){ err.textContent = mapAuthError(e); err.style.display = 'block'; }
+  finally{ btn.disabled = false; btn.textContent = '✅ أكّدت البريد'; }
+};
+EmailVerify.resend = async function(){
+  const btn = document.getElementById('ev-resend-btn'), err = document.getElementById('ev-error');
+  err.style.display = 'none';
+  if(Date.now() - EmailVerify._lastSent < 30000){ err.textContent = 'استنى شوية قبل ما تطلب رابط تاني.'; err.style.display = 'block'; return; }
+  btn.disabled = true;
+  try{ await sendEmailVerification(auth.currentUser); EmailVerify._lastSent = Date.now(); toast('تم إرسال رابط جديد'); }
+  catch(e){ err.textContent = mapAuthError(e); err.style.display = 'block'; }
+  finally{ btn.disabled = false; }
+};
+EmailVerify.logout = async function(){ const el = document.getElementById('email-verify-screen'); if(el) el.remove(); await signOut(auth); };
 
 onAuthStateChanged(auth, async (fbUser) => {
   console.log('[AUTH] onAuthStateChanged fired. fbUser =', fbUser ? fbUser.email : null, 'REGISTERING =', REGISTERING);
@@ -984,16 +1073,16 @@ onAuthStateChanged(auth, async (fbUser) => {
     // بدل ما نقفل الدخول بالكامل، نسمح بالدخول لكن نقفل كل الصفحات ماعدا الفوترة/الدردشة/التذاكر
     CHURCH_ACCESS_LOCKED = !isExempt && !trialValid && !activeValid;
 
+    /* بوابة تأكيد البريد: بس للحسابات اللي اتعملت بعد تفعيل الميزة دي ولسه ماأكدتش بريدها */
+    const acctCreated = fbUser.metadata && fbUser.metadata.creationTime ? Date.parse(fbUser.metadata.creationTime) : 0;
+    if(!fbUser.emailVerified && acctCreated > EMAIL_VERIFY_CUTOFF_MS){
+      showEmailVerifyGate(fbUser.email);
+      return;
+    }
+
     /* ----- تمام: دخول عادي للنظام ----- */
     console.log('[AUTH] step 9: normal church login, showing app');
-    hideAllAuthScreens();
-    document.getElementById('app').style.display='flex';
-    document.getElementById('current-user-name').textContent = CURRENT_USER.name;
-    document.getElementById('current-user-role').textContent = ROLE_LABELS[CURRENT_USER.role]||CURRENT_USER.role;
-    buildNav();
-    DB.users = [CURRENT_USER];
-    attachListeners(()=>{ App.navigate(CHURCH_ACCESS_LOCKED ? 'billing' : 'dashboard'); });
-    await log('تسجيل دخول', CURRENT_USER.name);
+    finishChurchLogin();
     console.log('[AUTH] DONE - church login flow complete');
   }catch(e){
     console.error('[AUTH] CAUGHT ERROR:', e);
@@ -4175,6 +4264,7 @@ Reception._camTick = function(){
   Reception._raf = requestAnimationFrame(Reception._camTick);
 };
 Reception._submit = async function(raw){
+  IdleTimer.ping();
   const val = (raw || '').trim(); if(!val) return;
   const now = Date.now();
   if(Reception._cooldown[val] && now - Reception._cooldown[val] < 3000) { Reception._clearInput(); return; }   // نفس الكود في آخر 3 ثواني = تجاهل (مسح مزدوج)
@@ -5280,6 +5370,12 @@ Views.settings = function(){
     </div>
 
     ${Scope.settingsCardHtml()}
+    <div class="section-head" style="margin-top:26px;"><h2>⏳ تسجيل خروج تلقائي بعد خمول</h2></div>
+    <div class="card card-pad" style="max-width:760px; margin-bottom:10px;">
+      <p class="muted" style="margin:0 0 10px;">لو محدّش استخدم النظام لمدة معيّنة، بيتم تسجيل خروجه تلقائيًا. مفيد للأجهزة المشتركة (زي جهاز وضع الاستقبال). صفر أو فاضي = متوقف.</p>
+      <div class="form-grid"><div class="field"><label>الخمول بالدقايق (0 = متوقف)</label><input type="number" id="set-idle-minutes" min="0" step="1" value="${(DB.settings||{}).idleLogoutMinutes || ''}"></div></div>
+      <button class="btn btn-primary btn-sm" onclick="SettingsV.saveIdleLogout()">حفظ</button>
+    </div>
 
     <div class="section-head" style="margin-top:26px;"><h2>💬 قوالب رسائل واتساب</h2></div>
     <div class="card card-pad" style="max-width:760px; margin-bottom:10px;">
@@ -5349,6 +5445,14 @@ SettingsV.save = async function(){
     document.getElementById('church-name-label').textContent = data.churchName || 'إدارة مدارس الأحد';
     await log('تعديل الإعدادات','');
     toast('تم حفظ الإعدادات');
+  }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
+};
+SettingsV.saveIdleLogout = async function(){
+  const mins = Math.max(0, Math.round(Number(document.getElementById('set-idle-minutes').value) || 0));
+  try{
+    await fsSet('settings', CURRENT_CHURCH_ID, {idleLogoutMinutes: mins});
+    await log('تعديل مهلة الخروج التلقائي', mins ? mins+' دقيقة' : 'إيقاف');
+    toast(mins ? 'تم الحفظ — الخروج التلقائي بعد '+mins+' دقيقة خمول' : 'تم إيقاف الخروج التلقائي');
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
 };
 SettingsV.setRestrictServants = async function(checked){
@@ -6061,4 +6165,4 @@ window.App = App; window.UI = UI; window.Members = Members; window.Servants = Se
 window.Stages = Stages; window.Attendance = Attendance; window.Evaluations = Evaluations;
 window.Followups = Followups; window.Activities = Activities; window.Reports = Reports;
 window.UsersV = UsersV; window.SettingsV = SettingsV; window.BackupV = BackupV; window.TrashV = TrashV;
-window.WA = WA; window.Onboarding = Onboarding; window.DataQuality = DataQuality; window.Lessons = Lessons; window.Reception = Reception;
+window.WA = WA; window.Onboarding = Onboarding; window.DataQuality = DataQuality; window.Lessons = Lessons; window.Reception = Reception; window.EmailVerify = EmailVerify;
