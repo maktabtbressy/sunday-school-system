@@ -4,7 +4,7 @@
    ========================================================= */
 
 /* رقم إصدار التطبيق: بيظهر أسفل القائمة الجانبية عشان تتأكد إنك رافع آخر نسخة. بيتزوّد مع كل تسليم جديد. */
-const APP_VERSION = '1.3 — تأكيد البريد وخروج تلقائي';
+const APP_VERSION = '1.4 — شعار الكنيسة والإعلان والدردشة';
 let DB = {settings:{schoolName:'مدرسة الأحد'}, stages:[], grades:[], classes:[], members:[], servants:[],
   attendance:[], evaluations:[], followups:[], activities:[], auditLog:[], users:[],
   paymentMethods:[], paymentProofs:[], chatMessages:[], tickets:[], plans:[]}; // ذاكرة مؤقتة تُزامَن تلقائيًا مع Firestore
@@ -361,7 +361,9 @@ const CHURCH_LOCKED_ALLOWED_PAGES = ['billing','chat','tickets'];
 let CURRENT_CHURCH = null;
 /* تأكيد البريد إلزامي بس للحسابات اللي اتعملت من التاريخ ده وبعده — الحسابات الأقدم (كل المستخدمين الحاليين) بتفضل شغالة عادي من غير أي خطوة إضافية. */
 const EMAIL_VERIFY_CUTOFF_MS = Date.parse('2026-09-22T00:00:00Z');
-let REGISTERING = false; // true أثناء تنفيذ عملية تسجيل كنيسة جديدة (لتجاهل onAuthStateChanged المؤقت)
+const CHAT_RETENTION_MS = 30*86400000;   // مدة الاحتفاظ برسائل الشات: 30 يوم، بعدها بتتحذف نهائيًا (انظر Chat.renderMessages و SuperAdmin.purgeOldChatMessages)
+let REGISTERING = false;
+let PUBLIC_ANNOUNCEMENT = null;   // إعدادات الإعلان (بتتخزن هنا وتتعرض بس بعد تسجيل الدخول، انظر maybeShowAnnouncement) // true أثناء تنفيذ عملية تسجيل كنيسة جديدة (لتجاهل onAuthStateChanged المؤقت)
 let HOLD_AUTH_SCREEN_UNTIL = 0; // لحظة تنتهي عندها "إمساك" شاشة الرسالة بعد signOut (انظر showPendingAndSignOut)
 
 const TRIAL_DAYS = 14;
@@ -453,6 +455,7 @@ function attachListeners(onReady){
   const unsubSettings = onSnapshot(doc(dbFire,'settings',CURRENT_CHURCH_ID), d=>{
     DB.settings = d.exists() ? d.data() : {churchName: CURRENT_CHURCH?CURRENT_CHURCH.name:'', schoolName:'مدرسة الأحد', contact:CURRENT_CHURCH?CURRENT_CHURCH.contactPhone:''};
     document.getElementById('church-name-label').textContent = DB.settings.churchName || 'إدارة مدارس الأحد';
+    updateSidebarPhoto();
     Scope.apply();
     IdleTimer.start();   // ممكن تتغيّر مدة الخمول وهو داخل
     tick();
@@ -591,6 +594,41 @@ async function deleteChatMessage(id){
   catch(e){ console.error(e); toast('تعذر حذف الرسالة: '+e.message); }
 }
 window.deleteChatMessage = deleteChatMessage;
+/* ---------- منع خروج بالغلط بزرار الرجوع (لما التطبيق متثبّت كـ PWA) ----------
+   زرار رجوع الموبايل بيقفل أي حاجة مفتوحة (مودال/قارئ باركود/وضع الاستقبال/القائمة الجانبية) الأول،
+   ولو مفيش حاجة مفتوحة، أول ضغطة بتوريه تنبيه "اضغط رجوع تاني للخروج" بدل ما تقفل التطبيق فورًا،
+   وضغطة تانية خلال 2.5 ثانية هي اللي فعلًا بتخرج. */
+function isInstalledPWA(){
+  try{ return (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || window.navigator.standalone === true; }
+  catch(_){ return false; }
+}
+let _backPressAt = 0;
+function initExitGuard(){
+  if(!isInstalledPWA()) return;
+  history.pushState({appGuard:true}, '', location.href);
+  window.addEventListener('popstate', function(){
+    const modalOpen = document.getElementById('modal-backdrop') && document.getElementById('modal-backdrop').classList.contains('open');
+    const scannerOpen = document.getElementById('scanner-overlay') && document.getElementById('scanner-overlay').classList.contains('open');
+    const receptionOpen = !!document.getElementById('reception-overlay');
+    const evOpen = !!document.getElementById('email-verify-screen');
+    const sidebarOpen = document.getElementById('sidebar') && document.getElementById('sidebar').classList.contains('open');
+    const saSidebarOpen = document.getElementById('sa-sidebar') && document.getElementById('sa-sidebar').classList.contains('open');
+    if(receptionOpen){ Reception.close(); history.pushState({appGuard:true}, '', location.href); return; }
+    if(modalOpen){ UI.closeModal(); history.pushState({appGuard:true}, '', location.href); return; }
+    if(scannerOpen){ Scanner.close(); history.pushState({appGuard:true}, '', location.href); return; }
+    if(evOpen){ history.pushState({appGuard:true}, '', location.href); return; }   // شاشة تأكيد البريد: منقفلهاش بزرار الرجوع
+    if(sidebarOpen){ UI.closeSidebar(); history.pushState({appGuard:true}, '', location.href); return; }
+    if(saSidebarOpen){ UI.closeSaSidebar(); history.pushState({appGuard:true}, '', location.href); return; }
+    const now = Date.now();
+    if(now - _backPressAt < 2500){ return; }   // ضغطة تانية خلال المهلة: سيبها تخرج فعليًا (من غير إعادة تعبئة الـ history)
+    _backPressAt = now;
+    toast('اضغط رجوع مرة تانية للخروج');
+    history.pushState({appGuard:true}, '', location.href);
+  });
+}
+document.addEventListener('DOMContentLoaded', initExitGuard);
+if(document.readyState !== 'loading') initExitGuard();
+
 /* إغلاق كاميرا الباركود تلقائيًا فى أي سيناريو تاني ممكن ينسى فيه المستخدم الكاميرا شغالة */
 function stopScannerIfActive(){
   if(window.Scanner && Scanner._stream){ Scanner._stream.getTracks().forEach(t=>t.stop()); Scanner._stream=null; }
@@ -930,6 +968,7 @@ function finishChurchLogin(){
   DB.users = [CURRENT_USER];
   attachListeners(()=>{ App.navigate(CHURCH_ACCESS_LOCKED ? 'billing' : 'dashboard'); });
   IdleTimer.start();
+  maybeShowAnnouncement();
   log('تسجيل دخول', CURRENT_USER.name);
 }
 /* ---------- بوابة تأكيد البريد الإلكتروني ---------- */
@@ -989,6 +1028,7 @@ onAuthStateChanged(auth, async (fbUser) => {
   if(!fbUser){
     console.log('[AUTH] no fbUser -> showing login screen');
     CURRENT_USER = null; CURRENT_CHURCH_ID = null; CURRENT_CHURCH = null; CHURCH_ACCESS_LOCKED = false;
+    document.getElementById('announcement-bar').style.display = 'none';   // الإعلان لمستخدمين مسجّلين بس، فيتخفي عند الخروج
     if(Date.now() < HOLD_AUTH_SCREEN_UNTIL){ HOLD_AUTH_SCREEN_UNTIL = 0; return; } // سيب شاشة الرسالة ظاهرة
     if(enforceMaintenanceGate()) return;
     hideAllAuthScreens();
@@ -1027,6 +1067,7 @@ onAuthStateChanged(auth, async (fbUser) => {
       document.getElementById('sa-user-name').textContent = CURRENT_USER.name;
       console.log('[AUTH] step 7: calling SuperAdmin.boot()');
       SuperAdmin.boot();
+      maybeShowAnnouncement();
       console.log('[AUTH] step 8: SuperAdmin.boot() called, logging audit entry');
       await log('تسجيل دخول (مالك النظام)', CURRENT_USER.name);
       console.log('[AUTH] DONE - superadmin flow complete');
@@ -1041,6 +1082,7 @@ onAuthStateChanged(auth, async (fbUser) => {
       document.getElementById('sa-user-name').textContent = CURRENT_USER.name + ' (أدمن فرعي)';
       SuperAdmin.boot();
       SuperAdmin.applyPermissionGating();
+      maybeShowAnnouncement();
       await saLog('تسجيل دخول (أدمن فرعي)', CURRENT_USER.name);
       return;
     }
@@ -1856,9 +1898,22 @@ SuperAdmin.openChat = function(churchId){
     if(SA_PAGE==='chats' && SA_CHAT_CHURCH_ID===churchId){
       SuperAdmin.renderChatMessages();
       markChatRead(SA_CHAT_MESSAGES.filter(m=>m.senderRole!=='superadmin'), 'readBySA');
+      SuperAdmin.purgeOldChatMessages(churchId);
     }
   }, err=>console.error(err));
   SuperAdmin.render();
+};
+/* حذف فعلي (من الطرفين ومن Firebase) لأي رسالة عدّى عليها 30 يوم — الإدارة هي الوحيدة اللي معاها صلاحية الحذف،
+   فالتنضيف بيحصل من هنا لما تفتح محادثة الكنيسة دي (مش عملية مجدولة في الخلفية، لأن مفيش Cloud Functions فى المشروع). */
+SuperAdmin._purged = {};
+SuperAdmin.purgeOldChatMessages = async function(churchId){
+  if(SuperAdmin._purged[churchId] && Date.now() - SuperAdmin._purged[churchId] < 60000) return;   // مرة كل دقيقة كحد أقصى لكل كنيسة
+  SuperAdmin._purged[churchId] = Date.now();
+  const cutoff = Date.now() - CHAT_RETENTION_MS;
+  const old = SA_CHAT_MESSAGES.filter(m=>(m.createdAt||0) < cutoff);
+  if(!old.length) return;
+  try{ await Promise.all(old.map(m=>deleteDoc(doc(dbFire,'chatMessages',m.id)))); }
+  catch(e){ console.error('chat purge failed', e); }
 };
 /* يخلي كنيسة معينة هي "النشطة" دلوقتي. لو فيه كنيسة نشطة تانية قبل كده، ترجع آخر واحدة
    فى طابور الانتظار من غير ما تتبعتلها رسالة إغلاق (زي ما اتفقنا: التبديل السريع مش إنهاء فعلي). */
@@ -2687,6 +2742,19 @@ const NAV_ITEMS = [
   {id:'trash', label:'سلة المحذوفات', ic:'🗑️', adminOnly:true},
 ];
 let IMPERSONATING = false; // true لما المالك يدخل مؤقتًا للوحة كنيسة معينة
+/* صورة صغيرة جنب اسم الكنيسة في القائمة الجانبية (لو الكنيسة رفعتها) — عنصر واحد بيتحدّث بدل ما يتبني كل مرة */
+function updateSidebarPhoto(){
+  const label = document.getElementById('church-name-label'); if(!label) return;
+  let img = document.getElementById('sidebar-church-photo');
+  const src = (DB.settings || {}).churchPhoto;
+  if(!src){ if(img) img.remove(); return; }
+  if(!img){
+    img = document.createElement('img'); img.id = 'sidebar-church-photo';
+    img.style.cssText = 'width:28px; height:28px; border-radius:8px; object-fit:cover; vertical-align:middle; margin-left:6px;';
+    label.parentNode.insertBefore(img, label);
+  }
+  if(img.src !== src) img.src = src;
+}
 function buildNav(){
   const nav = document.getElementById('nav');
   nav.innerHTML = NAV_ITEMS
@@ -4035,6 +4103,7 @@ Attendance.printRoster = function(classId, date){
       td.sig{width:160px;}
     </style></head>
     <body>
+      ${(DB.settings||{}).churchLogo ? `<img src="${esc(DB.settings.churchLogo)}" style="height:50px; max-width:220px; object-fit:contain; display:block; margin:0 0 8px;">` : ''}
       <h2>كشف حضور — ${esc(nameOf(DB.classes,classId))}</h2>
       <p>المرحلة: ${esc(nameOf(DB.stages, DB.classes.find(c=>c.id===classId)?.stageId))} · التاريخ: ${esc(fmtDate(date))} · العدد: ${members.length}</p>
       <table><thead><tr><th>#</th><th>الاسم</th><th>الكود</th><th class="sig">التوقيع</th></tr></thead>
@@ -4701,13 +4770,19 @@ function reportCard(title,desc,fn){
   </div>`;
 }
 const Reports = {};
+/* شعار الكنيسة: بيتحط فوق أي تقرير أو ورقة طباعة لو الكنيسة رفعته من الإعدادات. فاضي = مفيش حاجة (زي ما كان قبل الميزة دي). */
+function logoImgTag(maxH){
+  const src = (DB.settings || {}).churchLogo;
+  return src ? `<img src="${esc(src)}" style="height:${maxH || 46}px; max-width:220px; object-fit:contain; display:block; margin:0 auto 6px;">` : '';
+}
 function reportShell(title, tableHtml, extraControlsHtml){
   document.getElementById('report-output').innerHTML = `
     <div class="card card-pad">
       <div class="section-head"><h2>${title}</h2>
         <div class="toolbar no-print">${extraControlsHtml||''}<button class="btn btn-gold btn-sm" onclick="window.print()">طباعة / حفظ PDF</button></div>
       </div>
-      <div class="print-only" style="margin-bottom:10px;font-size:13px;color:var(--ink-soft);">
+      <div class="print-only" style="margin-bottom:10px;font-size:13px;color:var(--ink-soft); text-align:center;">
+        ${logoImgTag(44)}
         ${esc(DB.settings.churchName||'')} ${DB.settings.schoolName?' — '+esc(DB.settings.schoolName):''} · ${fmtDate(todayISO())}
       </div>
       ${tableHtml}
@@ -4825,7 +4900,7 @@ Reports.activitiesFinance = function(noScroll){
       <div class="section-head no-print"><h2>💰 رسوم ومصروفات الأنشطة</h2><div class="toolbar">
         <input type="date" id="fin-from" value="${from}" onchange="Reports.activitiesFinance(true)"><span class="muted">إلى</span><input type="date" id="fin-to" value="${to}" onchange="Reports.activitiesFinance(true)">
         <button class="btn btn-gold btn-sm" onclick="window.print()">طباعة / حفظ PDF</button></div></div>
-      <div style="text-align:center; margin:10px 0;"><b>تقرير رسوم ومصروفات الأنشطة</b> — ${esc((DB.settings||{}).churchName||'')}<br><span class="muted">${fmtDate(from)} إلى ${fmtDate(to)}</span></div>
+      <div style="text-align:center; margin:10px 0;">${logoImgTag(40)}<b>تقرير رسوم ومصروفات الأنشطة</b> — ${esc((DB.settings||{}).churchName||'')}<br><span class="muted">${fmtDate(from)} إلى ${fmtDate(to)}</span></div>
       <table><thead><tr><th>النشاط</th><th>التاريخ</th><th>المشاركون</th><th>رسوم الفرد</th><th>المطلوب</th><th>المحصّل</th><th>المتبقي</th><th>المصروفات</th><th>الصافي</th></tr></thead><tbody>
         ${F.length ? F.map(({a,f})=>`<tr><td>${esc(a.name)}</td><td>${fmtDate(a.date)}</td><td>${f.count}</td><td>${fmtNum(f.fee)}</td><td>${fmtNum(f.expected)}</td><td>${fmtNum(f.collected)}</td><td>${fmtNum(f.remaining)}</td><td>${fmtNum(f.expenses)}</td><td><b>${fmtNum(f.net)}</b></td></tr>`).join('') + `<tr style="font-weight:800; background:var(--paper);"><td colspan="4">الإجمالي</td><td>${fmtNum(sum('expected'))}</td><td>${fmtNum(sum('collected'))}</td><td>${fmtNum(sum('remaining'))}</td><td>${fmtNum(sum('expenses'))}</td><td>${fmtNum(sum('net'))}</td></tr>` : `<tr><td colspan="9" class="muted">مفيش أنشطة عليها رسوم أو مصروفات في الفترة دي. حدد الرسوم من "الأنشطة" ← 💰.</td></tr>`}
       </tbody></table>
@@ -4921,7 +4996,7 @@ Reports.lessons = function(noScroll){
         <input type="date" id="les-from" value="${from}" onchange="Reports.lessons(true)"><span class="muted">إلى</span><input type="date" id="les-to" value="${to}" onchange="Reports.lessons(true)">
         <button class="btn btn-primary btn-sm" onclick="Lessons.openForm('${todayISO()}','${stageId}')">＋ درس جديد</button>
         <button class="btn btn-gold btn-sm" onclick="window.print()">طباعة / حفظ PDF</button></div></div>
-      <div style="text-align:center; margin:10px 0;"><b>جدول المنهج</b> — ${esc((DB.settings||{}).churchName||'')}<br><span class="muted">${fmtDate(from)} إلى ${fmtDate(to)}</span></div>
+      <div style="text-align:center; margin:10px 0;">${logoImgTag(40)}<b>جدول المنهج</b> — ${esc((DB.settings||{}).churchName||'')}<br><span class="muted">${fmtDate(from)} إلى ${fmtDate(to)}</span></div>
       <table><thead><tr><th>التاريخ</th><th>المرحلة</th><th>الدرس</th><th>الآية / الحفظ</th><th>الحضور</th><th class="no-print"></th></tr></thead><tbody>
         ${rows.length ? rows.map(l=>`<tr><td>${fmtDate(l.date)}</td><td>${esc(nameOf(DB.stages,l.stageId))}</td><td>${esc(l.title)}${l.notes ? `<div class="muted" style="font-size:12px;">${esc(l.notes)}</div>` : ''}</td><td class="muted">${esc(l.verse||'—')}</td><td>${l.pct === null ? '—' : l.pct + '%'}</td>
           <td class="no-print"><button class="btn btn-ghost btn-sm" onclick="Lessons.openForm('${l.date}','${l.stageId}')">تعديل</button></td></tr>`).join('') : `<tr><td colspan="6" class="muted">مفيش دروس متسجّلة في الفترة دي. سجّل الدرس من صفحة الحضور أو زر "＋ درس جديد".</td></tr>`}
@@ -5029,7 +5104,7 @@ Reports.dataQuality = function(noScroll){
   const order = ['dupCode','noClass','noPhone','badPhone','noBirth','badBirth','classMismatch','noCode'];
   const body = `
     <style>.ann-title{text-align:center; margin-bottom:14px;} .ann-title h1{font-size:22px; margin:0 0 4px;} .ann-title p{margin:2px 0; color:var(--ink-soft);}</style>
-    <div class="ann-title"><h1>🧹 فحص جودة البيانات</h1><p>${esc((DB.settings||{}).churchName||'')}</p></div>
+    <div class="ann-title">${logoImgTag(50)}<h1>🧹 فحص جودة البيانات</h1><p>${esc((DB.settings||{}).churchName||'')}</p></div>
     <div class="stat-grid">
       ${statCard('اكتمال ملفات المخدومين', R.completePct + '%', R.completePct >= 90 ? 'good' : 'accent')}
       ${statCard('المخدومون النشطون اللي اتفحصوا', R.activeCount, '')}
@@ -5173,6 +5248,7 @@ Reports.annual = function(preset){
       @media print{ .ann-sign{display:flex;} .ann-two{grid-template-columns:1fr 1fr;} }
     </style>
     <div class="ann-title">
+      ${logoImgTag(50)}
       <h1>التقرير السنوي</h1>
       <p>${esc(S.churchName||'')}${S.schoolName ? ' — ' + esc(S.schoolName) : ''}</p>
       <p><b>${esc(label)}</b></p>
@@ -5369,6 +5445,33 @@ Views.settings = function(){
       <button class="btn btn-primary" style="margin-top:14px;" onclick="SettingsV.save()">حفظ الإعدادات</button>
     </div>
 
+    <div class="section-head" style="margin-top:26px;"><h2>🖼️ الهوية البصرية</h2></div>
+    <div class="card card-pad" style="max-width:760px; margin-bottom:10px;">
+      <div class="info-card-grid">
+        <div>
+          <b style="font-size:13px; display:block; margin-bottom:6px;">شعار الكنيسة</b>
+          <p class="muted" style="margin:0 0 8px; font-size:12.5px;">بيظهر أعلى التقارير وكشوف الطباعة.</p>
+          <div id="s-logo-preview" style="width:100%; max-width:200px; height:90px; border:1px dashed var(--line); border-radius:10px; display:flex; align-items:center; justify-content:center; background:var(--paper); margin-bottom:8px; overflow:hidden;">
+            ${s.churchLogo ? `<img src="${esc(s.churchLogo)}" style="max-width:100%; max-height:100%; object-fit:contain;">` : '<span class="muted" style="font-size:12px;">مفيش شعار</span>'}
+          </div>
+          <input type="file" id="s-logo-file" accept="image/*" style="display:none;" onchange="SettingsV.uploadImage('logo', this.files[0])">
+          <button type="button" class="btn btn-ghost btn-sm" onclick="document.getElementById('s-logo-file').click()">📷 ${s.churchLogo?'تغيير الشعار':'رفع شعار'}</button>
+          ${s.churchLogo ? `<button type="button" class="btn btn-danger btn-sm" onclick="SettingsV.removeImage('logo')">🗑 إزالة</button>` : ''}
+        </div>
+        <div>
+          <b style="font-size:13px; display:block; margin-bottom:6px;">صورة الكنيسة</b>
+          <p class="muted" style="margin:0 0 8px; font-size:12.5px;">بتظهر جنب اسم الكنيسة في القائمة الجانبية.</p>
+          <div id="s-photo-preview" style="width:100%; max-width:200px; height:90px; border:1px dashed var(--line); border-radius:10px; display:flex; align-items:center; justify-content:center; background:var(--paper); margin-bottom:8px; overflow:hidden;">
+            ${s.churchPhoto ? `<img src="${esc(s.churchPhoto)}" style="max-width:100%; max-height:100%; object-fit:cover;">` : '<span class="muted" style="font-size:12px;">مفيش صورة</span>'}
+          </div>
+          <input type="file" id="s-photo-file" accept="image/*" style="display:none;" onchange="SettingsV.uploadImage('photo', this.files[0])">
+          <button type="button" class="btn btn-ghost btn-sm" onclick="document.getElementById('s-photo-file').click()">📷 ${s.churchPhoto?'تغيير الصورة':'رفع صورة'}</button>
+          ${s.churchPhoto ? `<button type="button" class="btn btn-danger btn-sm" onclick="SettingsV.removeImage('photo')">🗑 إزالة</button>` : ''}
+        </div>
+      </div>
+      <p class="muted" style="margin:12px 0 0; font-size:12px;">بيتخزنوا مع باقي بيانات الكنيسة، فبيدخلوا في النسخة الاحتياطية تلقائيًا.</p>
+    </div>
+
     ${Scope.settingsCardHtml()}
     <div class="section-head" style="margin-top:26px;"><h2>⏳ تسجيل خروج تلقائي بعد خمول</h2></div>
     <div class="card card-pad" style="max-width:760px; margin-bottom:10px;">
@@ -5446,6 +5549,27 @@ SettingsV.save = async function(){
     await log('تعديل الإعدادات','');
     toast('تم حفظ الإعدادات');
   }catch(e){ console.error(e); toast('تعذر الحفظ: '+e.message); }
+};
+SettingsV.uploadImage = async function(kind, file){
+  if(!file) return;
+  const field = kind === 'logo' ? 'churchLogo' : 'churchPhoto';
+  try{
+    const img = await smartImageUpload(file, kind === 'logo' ? 500 : 700, 0.75);
+    await fsSet('settings', CURRENT_CHURCH_ID, {[field]: img});
+    await log(kind === 'logo' ? 'تحديث شعار الكنيسة' : 'تحديث صورة الكنيسة', '');
+    toast('تم الحفظ');
+    App.navigate('settings');
+  }catch(e){ console.error(e); toast('تعذر رفع الصورة: ' + e.message); }
+};
+SettingsV.removeImage = async function(kind){
+  const field = kind === 'logo' ? 'churchLogo' : 'churchPhoto';
+  if(!confirm(kind === 'logo' ? 'إزالة الشعار؟' : 'إزالة الصورة؟')) return;
+  try{
+    await fsSet('settings', CURRENT_CHURCH_ID, {[field]: ''});
+    await log(kind === 'logo' ? 'إزالة شعار الكنيسة' : 'إزالة صورة الكنيسة', '');
+    toast('تمت الإزالة');
+    App.navigate('settings');
+  }catch(e){ console.error(e); toast('تعذر الحذف: ' + e.message); }
 };
 SettingsV.saveIdleLogout = async function(){
   const mins = Math.max(0, Math.round(Number(document.getElementById('set-idle-minutes').value) || 0));
@@ -5828,14 +5952,17 @@ Chat.clearFile = function(){
 Chat.renderMessages = function(){
   const el = document.getElementById('chat-messages');
   if(!el) return;
-  const msgs = DB.chatMessages||[];
+  // رسائل أقدم من 30 يوم مابتتعرضش (بتتحذف فعليًا من قاعدة البيانات لما الإدارة تفتح نفس المحادثة — الكنيسة مالهاش صلاحية حذف)
+  const cutoff = Date.now() - CHAT_RETENTION_MS;
+  const msgs = (DB.chatMessages||[]).filter(m=>(m.createdAt||0) >= cutoff);
   el.innerHTML = msgs.length ? msgs.map(m=>{
     const mine = m.senderRole !== 'superadmin';
+    // اسم المالك (أو أي حد من فريق الإدارة) مايظهرش للكنيسة — بيظهر "الإدارة" بدل الاسم الشخصي
+    const displayName = mine ? m.senderName : 'الإدارة';
     return `<div style="display:flex; ${mine?'justify-content:flex-start;':'justify-content:flex-end;'} margin-bottom:10px;">
       <div style="max-width:72%; padding:9px 13px; border-radius:12px; font-size:13.5px; ${mine?'background:var(--paper); color:var(--ink);':'background:var(--navy); color:#fff;'}">
         <div style="display:flex; justify-content:space-between; gap:10px; font-size:11px; opacity:.7; margin-bottom:3px;">
-          <span>${esc(m.senderName)}</span>
-          ${mine? `<a style="cursor:pointer; color:var(--absent);" title="حذف الرسالة" onclick="deleteChatMessage('${m.id}')">🗑</a>` : ''}
+          <span>${esc(displayName)}</span>
         </div>
         ${m.imageBase64? chatAttachmentThumb(m.imageBase64) : ''}
         ${m.text? esc(m.text) : ''}
@@ -6126,12 +6253,19 @@ getDoc(doc(dbFire,'platformConfig','public')).then(d=>{
   const el = document.getElementById('public-contact-link');
   const hasAny = Object.values(PUBLIC_CONTACTS).some(v=>v);
   if(el && hasAny) el.style.display='block';
-  if(cfg.announcement && cfg.announcement.enabled && cfg.announcement.text && !ANNOUNCEMENT_DISMISSED){
-    document.getElementById('announcement-text').textContent = cfg.announcement.text;
-    document.getElementById('announcement-text2').textContent = cfg.announcement.text;
+  PUBLIC_ANNOUNCEMENT = cfg.announcement || null;   // بنسيبها لحد ما حد يسجّل دخول (maybeShowAnnouncement) — مش بتتعرض على الزوار
+  maybeShowAnnouncement();
+}).catch(()=>{});
+/* الإعلان بيتعرض بس لمستخدم مسجّل دخول فعليًا (أي دور)، مش للزوار على شاشة الدخول.
+   بتتنادى بعد ما تجهز حاجتين مش بالترتيب بالضرورة: إعدادات الإعلان (فوق) ونجاح تسجيل الدخول. */
+function maybeShowAnnouncement(){
+  if(!CURRENT_USER || !PUBLIC_ANNOUNCEMENT) return;
+  if(PUBLIC_ANNOUNCEMENT.enabled && PUBLIC_ANNOUNCEMENT.text && !ANNOUNCEMENT_DISMISSED){
+    document.getElementById('announcement-text').textContent = PUBLIC_ANNOUNCEMENT.text;
+    document.getElementById('announcement-text2').textContent = PUBLIC_ANNOUNCEMENT.text;
     document.getElementById('announcement-bar').style.display = 'flex';
   }
-}).catch(()=>{});
+}
 App.dismissAnnouncement = function(){
   ANNOUNCEMENT_DISMISSED = true;
   document.getElementById('announcement-bar').style.display = 'none';

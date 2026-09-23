@@ -241,10 +241,8 @@ service cloud.firestore {
         ((isSuperAdmin() || subAdminCan('support')) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['readBySA'])) ||
         (belongsToChurch(resource.data.churchId) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['readByChurch']))
       );
-      allow delete: if isSignedIn() && (
-        isSuperAdmin() || subAdminCan('support') ||
-        (belongsToChurch(resource.data.churchId) && resource.data.senderRole != 'superadmin')
-      );
+      // الحذف للمالك (أو دعم فني بصلاحية support) بس — الكنيسة مبقتش تقدر تحذف أي رسالة، ولا حتى بتاعتها هي
+      allow delete: if isSuperAdmin() || subAdminCan('support');
     }
 
     // ===== أنواع التذاكر المتاحة (مستند واحد 'main' يديره المالك أو دعم فني بصلاحية support) =====
