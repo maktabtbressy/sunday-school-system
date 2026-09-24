@@ -4,7 +4,7 @@
    ========================================================= */
 
 /* رقم إصدار التطبيق: بيظهر أسفل القائمة الجانبية عشان تتأكد إنك رافع آخر نسخة. بيتزوّد مع كل تسليم جديد. */
-const APP_VERSION = '1.4 — شعار الكنيسة والإعلان والدردشة';
+const APP_VERSION = '1.6 — صورة الكنيسة الكبيرة وتقييمات بالعربي';
 let DB = {settings:{schoolName:'مدرسة الأحد'}, stages:[], grades:[], classes:[], members:[], servants:[],
   attendance:[], evaluations:[], followups:[], activities:[], auditLog:[], users:[],
   paymentMethods:[], paymentProofs:[], chatMessages:[], tickets:[], plans:[]}; // ذاكرة مؤقتة تُزامَن تلقائيًا مع Firestore
@@ -430,7 +430,7 @@ function detachListeners(){ unsubscribers.forEach(u=>u()); unsubscribers = []; O
 function attachListeners(onReady){
   const isAdmin = CURRENT_USER && (CURRENT_USER.role==='admin' || IMPERSONATING);
   let pending = LIVE_COLLECTIONS.length + 2 + (isAdmin?1:0); // + settings + auditLog + (users لو مدير كنيسة)
-  const tick = () => { pending--; if(pending<=0 && onReady) { onReady(); onReady=null; } renderCurrent(); };
+  const tick = () => { pending--; if(pending<=0 && onReady) { onReady(); onReady=null; } renderCurrent(); updateAttentionBadges(); };
 
   if(isAdmin){
     const uq = query(collection(dbFire,'users'), where('churchId','==',CURRENT_CHURCH_ID));
@@ -610,9 +610,11 @@ function initExitGuard(){
     const modalOpen = document.getElementById('modal-backdrop') && document.getElementById('modal-backdrop').classList.contains('open');
     const scannerOpen = document.getElementById('scanner-overlay') && document.getElementById('scanner-overlay').classList.contains('open');
     const receptionOpen = !!document.getElementById('reception-overlay');
+    const lightboxOpen = !!document.getElementById('photo-lightbox');
     const evOpen = !!document.getElementById('email-verify-screen');
     const sidebarOpen = document.getElementById('sidebar') && document.getElementById('sidebar').classList.contains('open');
     const saSidebarOpen = document.getElementById('sa-sidebar') && document.getElementById('sa-sidebar').classList.contains('open');
+    if(lightboxOpen){ closeChurchPhotoLightbox(); history.pushState({appGuard:true}, '', location.href); return; }
     if(receptionOpen){ Reception.close(); history.pushState({appGuard:true}, '', location.href); return; }
     if(modalOpen){ UI.closeModal(); history.pushState({appGuard:true}, '', location.href); return; }
     if(scannerOpen){ Scanner.close(); history.pushState({appGuard:true}, '', location.href); return; }
@@ -965,6 +967,7 @@ function finishChurchLogin(){
   document.getElementById('current-user-name').textContent = CURRENT_USER.name;
   document.getElementById('current-user-role').textContent = ROLE_LABELS[CURRENT_USER.role]||CURRENT_USER.role;
   buildNav();
+  updateAttentionBadges();
   DB.users = [CURRENT_USER];
   attachListeners(()=>{ App.navigate(CHURCH_ACCESS_LOCKED ? 'billing' : 'dashboard'); });
   IdleTimer.start();
@@ -1029,6 +1032,7 @@ onAuthStateChanged(auth, async (fbUser) => {
     console.log('[AUTH] no fbUser -> showing login screen');
     CURRENT_USER = null; CURRENT_CHURCH_ID = null; CURRENT_CHURCH = null; CHURCH_ACCESS_LOCKED = false;
     document.getElementById('announcement-bar').style.display = 'none';   // الإعلان لمستخدمين مسجّلين بس، فيتخفي عند الخروج
+    document.title = 'نظام إدارة مدارس الأحد';   // نرجّع عنوان التاب الطبيعي (بلا عدّاد تنبيهات) بعد الخروج
     if(Date.now() < HOLD_AUTH_SCREEN_UNTIL){ HOLD_AUTH_SCREEN_UNTIL = 0; return; } // سيب شاشة الرسالة ظاهرة
     if(enforceMaintenanceGate()) return;
     hideAllAuthScreens();
@@ -2730,10 +2734,10 @@ const NAV_ITEMS = [
   {id:'stages', label:'المراحل والفصول', ic:'🏫'},
   {id:'attendance', label:'الحضور والغياب', ic:'📅'},
   {id:'evaluations', label:'التقييمات', ic:'⭐'},
-  {id:'followups', label:'المتابعة', ic:'📝'},
+  {id:'followups', label:'المتابعة', ic:'📝', badge:true},
   {id:'activities', label:'الأنشطة', ic:'🎉'},
-  {id:'reports', label:'التقارير', ic:'📊'},
-  {id:'billing', label:'الاشتراك والدفع', ic:'💳'},
+  {id:'reports', label:'التقارير', ic:'📊', badge:true},
+  {id:'billing', label:'الاشتراك والدفع', ic:'💳', badge:true},
   {id:'chat', label:'الدردشة مع الإدارة', ic:'💬', adminOnly:true, badge:true},
   {id:'tickets', label:'الدعم الفني والشكاوى', ic:'🎫', adminOnly:true, badge:true},
   {id:'users', label:'المستخدمون والصلاحيات', ic:'👥', adminOnly:true},
@@ -2750,10 +2754,29 @@ function updateSidebarPhoto(){
   if(!src){ if(img) img.remove(); return; }
   if(!img){
     img = document.createElement('img'); img.id = 'sidebar-church-photo';
-    img.style.cssText = 'width:28px; height:28px; border-radius:8px; object-fit:cover; vertical-align:middle; margin-left:6px;';
+    // نفس عرض أعلى القائمة الجانبية بالكامل (مربّعة)، واسم الكنيسة بيفضل تحتها مباشرة (label جاية بعدها في الـ DOM)
+    img.style.cssText = 'width:100%; aspect-ratio:1/1; object-fit:cover; border-radius:12px; display:block; margin:10px 0 8px; cursor:pointer;';
+    img.title = 'اضغط لعرض الصورة بالحجم الكامل';
+    img.onclick = openChurchPhotoLightbox;
     label.parentNode.insertBefore(img, label);
   }
   if(img.src !== src) img.src = src;
+}
+/* عرض صورة الكنيسة بحجمها الكامل في نافذة منبثقة — الضغط في أي مكان فاضي (خارج الصورة نفسها) بيقفلها، زي أي مودال تاني في النظام */
+function openChurchPhotoLightbox(){
+  const src = (DB.settings || {}).churchPhoto; if(!src) return;
+  if(document.getElementById('photo-lightbox')) return;
+  document.body.insertAdjacentHTML('beforeend', `
+    <div id="photo-lightbox" onclick="if(event.target===this) closeChurchPhotoLightbox()" style="position:fixed; inset:0; z-index:700; background:rgba(0,0,0,.85); display:flex; align-items:center; justify-content:center; padding:24px; cursor:pointer;">
+      <img src="${esc(src)}" style="max-width:92vw; max-height:92vh; object-fit:contain; border-radius:10px; box-shadow:0 10px 40px rgba(0,0,0,.5); cursor:default;">
+      <button onclick="closeChurchPhotoLightbox()" title="إغلاق" style="position:fixed; top:16px; left:16px; background:rgba(255,255,255,.15); border:none; color:#fff; width:38px; height:38px; border-radius:50%; font-size:18px; cursor:pointer;">✕</button>
+    </div>`);
+  document.addEventListener('keydown', _lightboxEscHandler);
+}
+function _lightboxEscHandler(e){ if(e.key === 'Escape') closeChurchPhotoLightbox(); }
+function closeChurchPhotoLightbox(){
+  const el = document.getElementById('photo-lightbox'); if(el) el.remove();
+  document.removeEventListener('keydown', _lightboxEscHandler);
 }
 function buildNav(){
   const nav = document.getElementById('nav');
@@ -2771,12 +2794,44 @@ function buildNav(){
   }
 }
 /* تحديث عدد رسائل غير مقروءة (أو أي عدّاد) جنب عنصر في القائمة الجانبية للكنيسة */
+/* ---------- مؤشرات التنبيه (badges) في القائمة الجانبية ---------- */
+/* بتتحسب من البيانات المحمّلة أصلًا (مفيش استعلام إضافي)، وبتتحدّث تلقائيًا مع أي تغيير لحظي (عبر tick()).
+   مهام متابعة متأخرة على "المتابعة"، أيام متبقية على الاشتراك (لو ≤7 أو منتهي) على "الاشتراك والدفع"،
+   وعدد ملاحظات فحص جودة البيانات (للمدير بس، زي تلميح لوحة التحكم بالظبط) على "التقارير". */
+function updateAttentionBadges(){
+  if(!CURRENT_USER || document.getElementById('app').style.display==='none') return;
+  const mySv = CURRENT_USER.servantId ? byId(DB.servants, CURRENT_USER.servantId) : null;
+  const overdue = (DB.followups||[]).filter(fupIsOverdue).filter(f=> !mySv || f.servantId===mySv.id).length;
+  App.updateNavBadge('followups', overdue);
+
+  let billingBadge = 0;
+  if(CHURCH_ACCESS_LOCKED){
+    billingBadge = 1;
+  } else if(CURRENT_CHURCH && (CURRENT_CHURCH.status==='trial' || CURRENT_CHURCH.status==='active')){
+    const untilIso = CURRENT_CHURCH.status==='trial' ? CURRENT_CHURCH.trialEndsAt : CURRENT_CHURCH.activeUntil;
+    if(untilIso){
+      const days = Math.ceil((new Date(untilIso).getTime() - Date.now()) / 86400000);
+      if(days <= 7) billingBadge = Math.max(1, days);
+    }
+  }
+  App.updateNavBadge('billing', billingBadge);
+
+  const dqOn = CURRENT_USER.role === 'admin' || IMPERSONATING;
+  App.updateNavBadge('reports', (dqOn && (DB.members||[]).length >= 3) ? DataQuality.compute().totalIssues : 0);
+}
 App.updateNavBadge = function(id, count){
   const el = document.getElementById('nav-badge-'+id);
   if(!el) return;
   el.textContent = count;
   el.style.display = count>0 ? 'inline-block' : 'none';
+  updateTabTitleBadge();
 };
+/* عنوان تبويب المتصفح بيوريك إجمالي كل التنبيهات (المتابعة + الاشتراك + جودة البيانات + الشات + التذاكر) من غير ما تفتح التطبيق أصلًا */
+function updateTabTitleBadge(){
+  const total = [...document.querySelectorAll('#nav .badge-count')].reduce((n, el)=> n + (el.style.display !== 'none' ? (parseInt(el.textContent, 10) || 0) : 0), 0);
+  const base = document.title.replace(/^\(\d+\)\s*/, '');
+  document.title = (total > 0 ? `(${total}) ` : '') + base;
+}
 App.navigate = function(page, param){
   if(CHURCH_ACCESS_LOCKED && !CHURCH_LOCKED_ALLOWED_PAGES.includes(page)){
     toast('انتهى اشتراك الكنيسة — الصفحة دي مش متاحة حاليًا. جدّد الاشتراك من "الاشتراك والدفع".');
@@ -4775,11 +4830,36 @@ function logoImgTag(maxH){
   const src = (DB.settings || {}).churchLogo;
   return src ? `<img src="${esc(src)}" style="height:${maxH || 46}px; max-width:220px; object-fit:contain; display:block; margin:0 auto 6px;">` : '';
 }
+/* ملف CSV من أول جدول في التقرير المعروض. أي عمود عنوانه فاضي (زي عمود الأزرار/الإجراءات) بيتستبعد أوتوماتيك.
+   BOM في الأول عشان إكسل العربي يفتح الملف بترميز صحيح من غير ما يتلخبط. */
+function csvCell(text){
+  text = String(text == null ? '' : text).replace(/\s+/g,' ').trim();
+  if(/[",\n]/.test(text)) text = '"' + text.replace(/"/g,'""') + '"';
+  return text;
+}
+function exportTableToCSV(filename){
+  const table = document.querySelector('#report-output table');
+  if(!table){ toast('مفيش جدول للتصدير'); return; }
+  const rows = [...table.querySelectorAll('tr')];
+  if(!rows.length){ toast('مفيش بيانات للتصدير'); return; }
+  const headerCells = [...rows[0].querySelectorAll('th')];
+  const keepIdx = headerCells.map((th,i)=> th.textContent.trim() ? i : -1).filter(i=>i>=0);
+  const lines = rows.map(tr=>{
+    const cells = [...tr.querySelectorAll('th,td')];
+    return keepIdx.map(i=> csvCell(cells[i] ? cells[i].textContent : '')).join(',');
+  });
+  const blob = new Blob(['\uFEFF' + lines.join('\r\n')], {type:'text/csv;charset=utf-8;'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = filename.replace(/[\/\\:*?"<>|]/g,'') + '.csv';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url), 2000);
+}
 function reportShell(title, tableHtml, extraControlsHtml){
+  const csvName = String(title).replace(/<[^>]+>/g,'').trim();
   document.getElementById('report-output').innerHTML = `
     <div class="card card-pad">
       <div class="section-head"><h2>${title}</h2>
-        <div class="toolbar no-print">${extraControlsHtml||''}<button class="btn btn-gold btn-sm" onclick="window.print()">طباعة / حفظ PDF</button></div>
+        <div class="toolbar no-print">${extraControlsHtml||''}<button class="btn btn-ghost btn-sm" onclick="exportTableToCSV('${esc(csvName).replace(/'/g,"&#39;")}')">⬇️ تصدير CSV</button><button class="btn btn-gold btn-sm" onclick="window.print()">طباعة / حفظ PDF</button></div>
       </div>
       <div class="print-only" style="margin-bottom:10px;font-size:13px;color:var(--ink-soft); text-align:center;">
         ${logoImgTag(44)}
@@ -5179,7 +5259,7 @@ Reports.annualData = function(from, to){
   const evs = DB.evaluations.filter(e=>inR(e.date));
   const crit = {}; let allSum = 0, allCnt = 0;
   evs.forEach(e=>Object.entries(e.scores||{}).forEach(([k,v])=>{ const n = Number(v); if(isNaN(n)) return; const c = crit[k] || (crit[k]={sum:0,cnt:0}); c.sum+=n; c.cnt++; allSum+=n; allCnt++; }));
-  const criteria = Object.keys(crit).map(k=>({name:k, avg:(crit[k].sum/crit[k].cnt).toFixed(1), cnt:crit[k].cnt})).sort((a,b)=>b.avg-a.avg);
+  const criteria = Object.keys(crit).map(k=>({name: EVAL_LABELS[k] || k, avg:(crit[k].sum/crit[k].cnt).toFixed(1), cnt:crit[k].cnt})).sort((a,b)=>b.avg-a.avg);
 
   // المتابعة والأنشطة
   const fups = DB.followups.filter(f=>inR(f.date)); const fupTypes = {};
@@ -6299,4 +6379,4 @@ window.App = App; window.UI = UI; window.Members = Members; window.Servants = Se
 window.Stages = Stages; window.Attendance = Attendance; window.Evaluations = Evaluations;
 window.Followups = Followups; window.Activities = Activities; window.Reports = Reports;
 window.UsersV = UsersV; window.SettingsV = SettingsV; window.BackupV = BackupV; window.TrashV = TrashV;
-window.WA = WA; window.Onboarding = Onboarding; window.DataQuality = DataQuality; window.Lessons = Lessons; window.Reception = Reception; window.EmailVerify = EmailVerify;
+window.WA = WA; window.Onboarding = Onboarding; window.DataQuality = DataQuality; window.Lessons = Lessons; window.Reception = Reception; window.EmailVerify = EmailVerify; window.exportTableToCSV = exportTableToCSV; window.openChurchPhotoLightbox = openChurchPhotoLightbox; window.closeChurchPhotoLightbox = closeChurchPhotoLightbox;
