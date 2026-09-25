@@ -4,7 +4,7 @@
    ========================================================= */
 
 /* رقم إصدار التطبيق: بيظهر أسفل القائمة الجانبية عشان تتأكد إنك رافع آخر نسخة. بيتزوّد مع كل تسليم جديد. */
-const APP_VERSION = '1.6 — صورة الكنيسة الكبيرة وتقييمات بالعربي';
+const APP_VERSION = '1.7 — تبويبات الإعدادات وتقارير جديدة';
 let DB = {settings:{schoolName:'مدرسة الأحد'}, stages:[], grades:[], classes:[], members:[], servants:[],
   attendance:[], evaluations:[], followups:[], activities:[], auditLog:[], users:[],
   paymentMethods:[], paymentProofs:[], chatMessages:[], tickets:[], plans:[]}; // ذاكرة مؤقتة تُزامَن تلقائيًا مع Firestore
@@ -4806,6 +4806,8 @@ Views.reports = function(){
       ${reportCard('📖 جدول المنهج','الدروس المسجّلة لكل مرحلة مع الآية ونسبة الحضور في يوم كل درس.','Reports.lessons()')}
       ${reportCard('🧹 فحص جودة البيانات','بيكشف بيانات ناقصة أو غلط: أرقام هاتف، تواريخ ميلاد، فصول، أكواد مكررة، وأسماء مكررة — مع تعديل مباشر.','Reports.dataQuality()')}
       ${reportCard('كشف جميع المخدومين','قائمة كاملة ببيانات المخدومين مع المرحلة والفصل والحالة.','Reports.membersList()')}
+      ${reportCard('👥 كشف الخدام','بيانات كل الخدام وفصولهم وأرقامهم وحساباتهم المرتبطة.','Reports.servantsList()')}
+      ${reportCard('📅 دفتر أعياد الميلاد','كل المخدومين مرتبين بشهر وتاريخ الميلاد، مع فلتر بشهر معيّن.','Reports.birthdays()')}
       ${reportCard('كشف حضور خلال فترة','تقرير حضور وغياب تفصيلي حسب المرحلة/الفصل وفترة زمنية.','Reports.attendanceRange()')}
       ${reportCard('كشف حضور فردي','تقرير حضور وغياب مخدوم واحد بعينه خلال فترة محددة.','Reports.individualAttendance()')}
       ${reportCard('تقرير الحضور الإجمالي','إجمالي أيام الحضور والغياب ونسبة الحضور لكل مخدوم.','Reports.attendanceTotal()')}
@@ -4875,6 +4877,34 @@ Reports.membersList = function(){
     <table><thead><tr><th>الكود</th><th>الاسم</th><th>المرحلة</th><th>الفصل</th><th>الهاتف</th><th>الحالة</th></tr></thead>
     <tbody>${rows.map(m=>`<tr><td>${esc(m.code)}</td><td>${esc(m.name)}</td><td>${esc(nameOf(DB.stages,m.stageId))}</td><td>${esc(nameOf(DB.classes,m.classId))}</td><td>${esc(m.phone)}</td><td>${m.status==='inactive'?'غير نشط':'نشط'}</td></tr>`).join('')}</tbody></table>
   `);
+};
+Reports.servantsList = function(){
+  const rows = DB.servants;
+  reportShell('👥 كشف جميع الخدام ('+rows.length+')', `
+    <table><thead><tr><th>الاسم</th><th>الفصول</th><th>الهاتف</th><th>الحساب المرتبط</th><th>الحالة</th></tr></thead>
+    <tbody>${rows.length ? rows.map(sv=>{
+      const classNames = servantClassIds(sv).map(id=>nameOf(DB.classes,id)).filter(Boolean).join('، ') || '—';
+      const acct = (DB.users||[]).find(u=>u.servantId===sv.id);
+      return `<tr><td>${esc(sv.name)}</td><td>${esc(classNames)}</td><td>${esc(sv.phone||'—')}</td><td>${acct ? esc(acct.email||acct.name) : '—'}</td><td>${sv.status==='inactive'?'غير نشط':'نشط'}</td></tr>`;
+    }).join('') : `<tr><td colspan="5" class="muted">لا يوجد خدام مسجّلون بعد.</td></tr>`}</tbody></table>
+  `);
+};
+const BIRTHDAY_MONTHS = ['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
+/* دفتر أعياد الميلاد: كل المخدومين مرتبين بيوم وشهر الميلاد (بغض النظر عن السنة)، مع فلتر اختياري بشهر معيّن.
+   عمود "السن" = العمر اللي هيبلغه المخدوم في السنة الميلادية الحالية (مش عمره الفعلي دلوقتي لو عيد ميلاده لسه ما جاش) — ده المتعارف عليه في دفاتر أعياد الميلاد. */
+Reports.birthdays = function(){
+  const monthEl = document.getElementById('bd-month');
+  const month = monthEl ? monthEl.value : '';
+  const thisYear = new Date().getFullYear();
+  const rows = DB.members.filter(m=>m.status!=='inactive' && m.birthDate && !isNaN(new Date(m.birthDate)))
+    .map(m=>{ const d = new Date(m.birthDate); return {...m, _month:d.getMonth()+1, _day:d.getDate(), _turns: thisYear - d.getFullYear()}; })
+    .filter(m=> !month || m._month === Number(month))
+    .sort((a,b)=> a._month-b._month || a._day-b._day || a.name.localeCompare(b.name,'ar'));
+  reportShell(`📅 دفتر أعياد الميلاد${month ? ' — '+BIRTHDAY_MONTHS[Number(month)-1] : ''} (${rows.length})`, `
+    <table><thead><tr><th>اليوم</th><th>الاسم</th><th>الفصل</th><th>السن (هذا العام)</th></tr></thead>
+    <tbody>${rows.length ? rows.map(m=>`<tr><td>${String(m._day).padStart(2,'0')} ${BIRTHDAY_MONTHS[m._month-1]}</td><td>${esc(m.name)}</td><td>${esc(nameOf(DB.classes,m.classId))}</td><td>${m._turns} سنة</td></tr>`).join('')
+      : `<tr><td colspan="4" class="muted">مفيش مخدومين بتاريخ ميلاد مسجّل${month ? ' في الشهر ده' : ''}.</td></tr>`}</tbody></table>
+  `, `<select id="bd-month" onchange="Reports.birthdays()"><option value="">كل الشهور</option>${BIRTHDAY_MONTHS.map((n,i)=>`<option value="${i+1}" ${Number(month)===i+1?'selected':''}>${n}</option>`).join('')}</select>`);
 };
 Reports.attendanceRange = function(){
   const from = document.getElementById('rep-from')?.value || todayISO();
@@ -5504,13 +5534,20 @@ UsersV.remove = async function(id){
 };
 
 /* ---------- Settings ---------- */
+/* صفحة الإعدادات مقسّمة تبويبات (عام/الأمان/واتساب/قوائم المهام/السجل) بعد ما بقت طويلة أوي كصفحة واحدة.
+   نفس نمط تبويبات بروفايل المخدوم بالظبط: تبويب نشط في متغيّر واحد + إعادة رسم الصفحة كاملة (App.navigate) عند التبديل. */
+let CURRENT_SETTINGS_TAB = 'general';
 Views.settings = function(){
   const s = DB.settings;
+  const _T = CURRENT_SETTINGS_TAB;
+  const _tabs = [['general','⚙️ عام'],['security','🔒 الأمان'],['whatsapp','💬 قوالب واتساب'],['lists','📋 قوائم المهام'],['log','📜 سجل العمليات']];
   let filteredLog = DB.auditLog||[];
   if(CHURCH_LOG_FILTERS.from) filteredLog = filteredLog.filter(l=> l.date && l.date.slice(0,10) >= CHURCH_LOG_FILTERS.from);
   if(CHURCH_LOG_FILTERS.to) filteredLog = filteredLog.filter(l=> l.date && l.date.slice(0,10) <= CHURCH_LOG_FILTERS.to);
   $content().innerHTML = `
     <div class="section-head"><h2>إعدادات النظام</h2></div>
+    <div class="tabs no-print">${_tabs.map(([k,l])=>`<button class="tab-btn ${_T===k?'active':''}" onclick="SettingsV.setTab('${k}')">${l}</button>`).join('')}</div>
+    <div class="tab-panel ${_T==='general'?'active':''}">
     <div class="card card-pad" style="max-width:560px; margin-bottom:16px;">
       <b style="font-size:13px; display:block; margin-bottom:8px;">🔔 إشعارات المتصفح</b>
       <p class="muted" style="margin:0 0 10px;">هتوصلك إشعار فوري لما يجيلك رد شات أو تذكرة جديدة، حتى لو التاب فاتح فى الخلفية.</p>
@@ -5552,6 +5589,9 @@ Views.settings = function(){
       <p class="muted" style="margin:12px 0 0; font-size:12px;">بيتخزنوا مع باقي بيانات الكنيسة، فبيدخلوا في النسخة الاحتياطية تلقائيًا.</p>
     </div>
 
+    </div>
+
+    <div class="tab-panel ${_T==='security'?'active':''}">
     ${Scope.settingsCardHtml()}
     <div class="section-head" style="margin-top:26px;"><h2>⏳ تسجيل خروج تلقائي بعد خمول</h2></div>
     <div class="card card-pad" style="max-width:760px; margin-bottom:10px;">
@@ -5560,6 +5600,9 @@ Views.settings = function(){
       <button class="btn btn-primary btn-sm" onclick="SettingsV.saveIdleLogout()">حفظ</button>
     </div>
 
+    </div>
+
+    <div class="tab-panel ${_T==='whatsapp'?'active':''}">
     <div class="section-head" style="margin-top:26px;"><h2>💬 قوالب رسائل واتساب</h2></div>
     <div class="card card-pad" style="max-width:760px; margin-bottom:10px;">
       <p class="muted" style="margin:0 0 6px;">عدّل صياغة الرسائل الجاهزة اللي بتظهر عند الضغط على 💬 جنب المخدوم. الكلمات بين الأقواس بتتبدّل تلقائيًا ببيانات المخدوم:</p>
@@ -5572,6 +5615,9 @@ Views.settings = function(){
       <button class="btn btn-primary" onclick="SettingsV.saveWaTemplates()">حفظ القوالب</button>
     </div>
 
+    </div>
+
+    <div class="tab-panel ${_T==='lists'?'active':''}">
     <div class="section-head" style="margin-top:26px;"><h2>📋 قوائم المهام (أسماء الأنشطة وأنواع المتابعة)</h2></div>
     <div class="info-card-grid" style="margin-bottom:10px;">
       <div class="card card-pad">
@@ -5595,6 +5641,9 @@ Views.settings = function(){
         </div>
       </div>
     </div>
+    </div>
+
+    <div class="tab-panel ${_T==='log'?'active':''}">
     <div class="section-head" style="margin-top:26px;"><h2>سجل العمليات</h2></div>
     <div class="card card-pad" style="margin-bottom:12px;">
       <div class="toolbar">
@@ -5608,10 +5657,12 @@ Views.settings = function(){
     </div>
     <div class="card"><table><thead><tr><th>التاريخ</th><th>المستخدم</th><th>العملية</th><th>التفاصيل</th></tr></thead>
     <tbody>${filteredLog.length ? filteredLog.slice(0,300).map(l=>`<tr><td>${fmtDate(l.date)}</td><td>${esc(l.user)}</td><td>${esc(l.action)}</td><td class="muted">${esc(l.details)}</td></tr>`).join('') : `<tr><td colspan="4" class="muted">لا توجد عمليات مسجلة فى هذه الفترة</td></tr>`}</tbody></table></div>
+    </div>
   `;
 };
 let CHURCH_LOG_FILTERS = {from: monthStartISO(), to:''};
 const SettingsV = {};
+SettingsV.setTab = function(tab){ CURRENT_SETTINGS_TAB = tab; App.navigate('settings'); };
 SettingsV.applyLogFilters = function(){
   CHURCH_LOG_FILTERS = { from: document.getElementById('log-f-from').value, to: document.getElementById('log-f-to').value };
   Views.settings();
