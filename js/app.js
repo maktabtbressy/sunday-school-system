@@ -4,7 +4,7 @@
    ========================================================= */
 
 /* رقم إصدار التطبيق: بيظهر أسفل القائمة الجانبية عشان تتأكد إنك رافع آخر نسخة. بيتزوّد مع كل تسليم جديد. */
-const APP_VERSION = '1.7 — تبويبات الإعدادات وتقارير جديدة';
+const APP_VERSION = '1.8 — تقرير تقييمات تفصيلي ودليل أولياء الأمور';
 let DB = {settings:{schoolName:'مدرسة الأحد'}, stages:[], grades:[], classes:[], members:[], servants:[],
   attendance:[], evaluations:[], followups:[], activities:[], auditLog:[], users:[],
   paymentMethods:[], paymentProofs:[], chatMessages:[], tickets:[], plans:[]}; // ذاكرة مؤقتة تُزامَن تلقائيًا مع Firestore
@@ -4806,13 +4806,14 @@ Views.reports = function(){
       ${reportCard('📖 جدول المنهج','الدروس المسجّلة لكل مرحلة مع الآية ونسبة الحضور في يوم كل درس.','Reports.lessons()')}
       ${reportCard('🧹 فحص جودة البيانات','بيكشف بيانات ناقصة أو غلط: أرقام هاتف، تواريخ ميلاد، فصول، أكواد مكررة، وأسماء مكررة — مع تعديل مباشر.','Reports.dataQuality()')}
       ${reportCard('كشف جميع المخدومين','قائمة كاملة ببيانات المخدومين مع المرحلة والفصل والحالة.','Reports.membersList()')}
+      ${reportCard('📞 دليل أرقام أولياء الأمور','أسماء وأرقام أولياء الأمور لكل مخدوم، جاهز للطباعة أو التواصل.','Reports.guardianContacts()')}
       ${reportCard('👥 كشف الخدام','بيانات كل الخدام وفصولهم وأرقامهم وحساباتهم المرتبطة.','Reports.servantsList()')}
       ${reportCard('📅 دفتر أعياد الميلاد','كل المخدومين مرتبين بشهر وتاريخ الميلاد، مع فلتر بشهر معيّن.','Reports.birthdays()')}
       ${reportCard('كشف حضور خلال فترة','تقرير حضور وغياب تفصيلي حسب المرحلة/الفصل وفترة زمنية.','Reports.attendanceRange()')}
       ${reportCard('كشف حضور فردي','تقرير حضور وغياب مخدوم واحد بعينه خلال فترة محددة.','Reports.individualAttendance()')}
       ${reportCard('تقرير الحضور الإجمالي','إجمالي أيام الحضور والغياب ونسبة الحضور لكل مخدوم.','Reports.attendanceTotal()')}
       ${reportCard('الغياب المتكرر','قائمة المخدومين الذين يحتاجون متابعة بسبب الغياب.','Reports.needFollowup()')}
-      ${reportCard('تقرير التقييمات','متوسط تقييم كل مخدوم خلال فترة.','Reports.evaluationsReport()')}
+      ${reportCard('📊 تقرير التقييمات التفصيلي','متوسط كل معيار تقييم لكل مخدوم على حدة (مش رقم واحد مجمّع).','Reports.evaluationsReport()')}
       ${reportCard('تقرير المتابعة','كل سجلات المتابعة الفردية.','Reports.followupsReport()')}
       ${reportCard('تقرير الأنشطة والمشاركة','قائمة الأنشطة وعدد المشاركين في كل نشاط.','Reports.activitiesReport()')}
     </div>
@@ -4876,6 +4877,13 @@ Reports.membersList = function(){
   reportShell('كشف جميع المخدومين ('+rows.length+')', `
     <table><thead><tr><th>الكود</th><th>الاسم</th><th>المرحلة</th><th>الفصل</th><th>الهاتف</th><th>الحالة</th></tr></thead>
     <tbody>${rows.map(m=>`<tr><td>${esc(m.code)}</td><td>${esc(m.name)}</td><td>${esc(nameOf(DB.stages,m.stageId))}</td><td>${esc(nameOf(DB.classes,m.classId))}</td><td>${esc(m.phone)}</td><td>${m.status==='inactive'?'غير نشط':'نشط'}</td></tr>`).join('')}</tbody></table>
+  `);
+};
+Reports.guardianContacts = function(){
+  const rows = DB.members.filter(m=>m.status!=='inactive').slice().sort((a,b)=>a.name.localeCompare(b.name,'ar'));
+  reportShell('📞 دليل أرقام أولياء الأمور ('+rows.length+')', `
+    <table><thead><tr><th>المخدوم</th><th>الفصل</th><th>ولي الأمر</th><th>رقم ولي الأمر</th><th>رقم المخدوم</th></tr></thead>
+    <tbody>${rows.length ? rows.map(m=>`<tr><td>${esc(m.name)}</td><td>${esc(nameOf(DB.classes,m.classId))}</td><td>${esc(m.guardianName||'—')}</td><td>${esc(m.guardianPhone||'—')}</td><td>${esc(m.phone||'—')}</td></tr>`).join('') : `<tr><td colspan="5" class="muted">لا يوجد مخدومون نشطون.</td></tr>`}</tbody></table>
   `);
 };
 Reports.servantsList = function(){
@@ -4970,16 +4978,30 @@ Reports.needFollowup = function(){
     <tbody>${rows.map(m=>`<tr><td>${esc(m.name)}</td><td>${esc(nameOf(DB.classes,m.classId))}</td><td>${esc(m.reason)}</td></tr>`).join('')}</tbody></table>
   `);
 };
+/* تقرير التقييمات التفصيلي: متوسط كل معيار على حدة لكل مخدوم (مش رقم واحد مجمّع بيخفي التفاصيل).
+   الأعمدة بترتيب EVAL_GROUPS (روحيًا ثم سلوكيًا ثم دراسيًا)، وبتظهر بس المعايير اللي فعلًا اتقيّمت مرة في الكنيسة دي
+   (عشان الكنيسة اللي بتستخدم نص المعايير مايبقاش عندها أعمدة فاضية طول الوقت). */
 Reports.evaluationsReport = function(){
-  const rows = DB.members.map(m=>{
+  const isScored = v => v !== undefined && v !== '' && !isNaN(Number(v));
+  const usedKeys = new Set();
+  DB.evaluations.forEach(e=>Object.entries(e.scores||{}).forEach(([k,v])=>{ if(isScored(v)) usedKeys.add(k); }));
+  const flatKeys = Object.values(EVAL_GROUPS).flat().filter(k=>usedKeys.has(k));
+  const rows = DB.members.filter(m=>m.status!=='inactive').map(m=>{
     const evs = DB.evaluations.filter(e=>e.memberId===m.id);
-    const vals = evs.flatMap(e=>Object.values(e.scores||{}));
-    const avg = vals.length? (vals.reduce((a,b)=>a+Number(b),0)/vals.length).toFixed(1) : '—';
-    return {name:m.name, count:evs.length, avg};
+    const perCrit = {};
+    flatKeys.forEach(k=>{
+      const vals = evs.map(e=>(e.scores||{})[k]).filter(isScored).map(Number);
+      perCrit[k] = vals.length ? (vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(1) : '—';
+    });
+    const allVals = evs.flatMap(e=>Object.values(e.scores||{})).filter(isScored).map(Number);
+    const overall = allVals.length ? (allVals.reduce((a,b)=>a+b,0)/allVals.length).toFixed(1) : '—';
+    return {name:m.name, count:evs.length, perCrit, overall};
   });
-  reportShell('تقرير متوسط التقييمات', `
-    <table><thead><tr><th>المخدوم</th><th>عدد التقييمات</th><th>المتوسط</th></tr></thead>
-    <tbody>${rows.map(r=>`<tr><td>${esc(r.name)}</td><td>${r.count}</td><td>${r.avg}</td></tr>`).join('')}</tbody></table>
+  const colCount = flatKeys.length + 3;
+  reportShell('📊 تقرير التقييمات التفصيلي', `
+    <table><thead><tr><th>المخدوم</th><th>عدد التقييمات</th>${flatKeys.map(k=>`<th>${esc(EVAL_LABELS[k]||k)}</th>`).join('')}<th>المتوسط العام</th></tr></thead>
+    <tbody>${rows.length ? rows.map(r=>`<tr><td>${esc(r.name)}</td><td>${r.count}</td>${flatKeys.map(k=>`<td>${r.perCrit[k]}</td>`).join('')}<td><b>${r.overall}</b></td></tr>`).join('') : `<tr><td colspan="${colCount}" class="muted">لا يوجد مخدومون نشطون.</td></tr>`}</tbody></table>
+    ${!flatKeys.length ? '<p class="muted" style="margin-top:10px;">لا توجد تقييمات مسجّلة بعد — أضف تقييمات من صفحة "التقييمات" الأول.</p>' : ''}
   `);
 };
 Reports.followupsReport = function(){
